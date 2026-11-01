@@ -1,0 +1,44 @@
+# Provider route for the ACP profile: OpenCode Go (not Zen).
+# Mirrors ~/.dsh/profiles/headless/cordis.patch.yml.
+# The key itself is NOT here: OPENCODE_GO_API_KEY is resolved from
+# ~/.dsh/.credentials.yaml (refs) or the environment.
+- id: llm-deepseek
+  name: "@deepseek-ai/dsh-llm-deepseek-api-key"
+  config:
+    apiKeyEnv: OPENCODE_GO_API_KEY
+    baseURL: https://opencode.ai/zen/go/v1
+    models:
+      - id: deepseek-v4.1-flash
+        name: DeepSeek V4.1 Flash
+        contextWindow: 1000000
+        systemPromptUpdate: in-history
+        inputModalities: [text, image]
+        imagePixelBudget: 640000
+        imageMaxBytes: 1048576
+
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: deepseek-official
+    model: deepseek-v4.1-flash
+    reasoningEffort: max
+
+- insert:
+    # Subagent route: expose the Antigravity CLI (agy / Gemini 3.8 Flash) to the
+    # DeepSeek agent through the agy-mcp bridge. Tools appear as
+    # mcp__agy__agy_start, mcp__agy__agy_send, mcp__agy__agy_status, ...
+    - id: mcp-agy
+      name: "@deepseek-ai/dsh-mcp-client"
+      config:
+        serverName: agy
+        transport: stdio
+        # Node used to run agy-mcp. Override with DSH_NODE_BIN when the
+        # container/host has no `node` on PATH; process.execPath (the Node
+        # already running DSH) is a good default.
+        command: !!js process.env.DSH_NODE_BIN || process.execPath
+        args:
+          - !!js process.env.AGY_MCP_SERVER || (process.env.HOME + '/.local/share/agy-mcp/server.mjs')
+        env:
+          AGY_WORKSPACE: !!js process.env.AGY_WORKSPACE || process.env.DSH_ACP_WORKSPACE || process.cwd()
+          AGY_ALLOW_WRITE: !!js "process.env.DSH_PERMISSION_MODE === 'read-only' ? '0' : '1'"
+        toolCallTimeoutMs: 600000

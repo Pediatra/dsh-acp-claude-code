@@ -1,0 +1,11 @@
+# secrets
+.env
+
+# vendored runtime (static Node, etc.)
+node/
+
+# local noise
+*.log
+*.bak
+*.bak-*
+.DS_Store
