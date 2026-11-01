@@ -253,7 +253,7 @@ class AcpSession {
   /** Free the ACP process after an idle window; the session is then forgotten. */
   scheduleIdleClose() {
     this.clearIdleTimer();
-    if (IDLE_TTL_SECONDS <= 0 || this.status === "running") return;
+    if (this.closed || IDLE_TTL_SECONDS <= 0 || this.status === "running") return;
     this.idleTimer = setTimeout(() => {
       if (this.status === "running") return;
       log(`idle TTL (${IDLE_TTL_SECONDS}s): closing ${this.id}`);
@@ -391,6 +391,11 @@ class AcpSession {
   async close() {
     this.closed = true;
     this.clearIdleTimer();
+    // Resolve any pending deepseek_wait/status immediately: killing the process
+    // otherwise leaves the wait pending until its own timeout.
+    this.status = "closed";
+    this.stopReason = "closed";
+    this.finishTurn();
     try {
       if (this.sessionId) {
         await this.request("session/close", { sessionId: this.sessionId }, 5_000).catch(() => {});
