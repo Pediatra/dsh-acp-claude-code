@@ -26,6 +26,18 @@ background e notifica no fim) e fecha a sessão quando termina.
   esperam todas ao mesmo tempo (tempo = a mais lenta, não a soma).
 - **Sem polling:** a chamada de `wait` é o canal de aviso. O Claude Code
   auto-backgrounda após 8s e acorda o modelo quando o turno termina.
+- **Espera fora do turno:** o servidor grava estado/output por sessão e os
+  comandos `dsh-wait`/`agy-wait` bloqueiam em outro processo, sem segurar o
+  turno do Claude. Rode-os com Bash `run_in_background`.
+- **Perfil por sessão:** `profile` com `instructions`, `writable_dirs` e
+  `forbidden_paths`; o agy aplica em `bwrap`, o DSH aplica no wrapper de
+  `host-spawn`/podman.
+- **Log de tools:** comando, saída e exit code vão para um JSONL por sessão; o
+  resultado devolve só contagem e arquivos mudados.
+- **Verificação:** `verify_command`/`*_verify` rodam um teste, devolvem o exit
+  code e devolvem o erro ao agente para uma nova tentativa.
+- **IDs duráveis:** `deepseek_sessions`/`agy_conversations` listam o que
+  sobrevive ao restart; use com `*_resume`.
 - **Turno longo não vira erro:** o `session/prompt` não tem timeout no cliente;
   a janela é só do `wait`. Estourou, a sessão continua `running` e o resultado
   atrasado ainda é capturado.
@@ -43,10 +55,12 @@ background e notifica no fim) e fecha a sessão quando termina.
 dsh-acp/     # copie para ~/.local/share/dsh-acp-mcp/
   server.mjs
   acp-overlay.yml
+  bin/dsh-wait
   README.md
   TUTORIAL.md
 agy-mcp/     # copie para ~/.local/share/agy-mcp/
   server.mjs
+  bin/agy-wait
   README.md
 ```
 
@@ -68,6 +82,9 @@ cd dsh-acp-claude-code
 mkdir -p ~/.local/share/dsh-acp-mcp ~/.local/share/agy-mcp
 cp -r dsh-acp/* ~/.local/share/dsh-acp-mcp/
 cp -r agy-mcp/* ~/.local/share/agy-mcp/
+mkdir -p ~/.local/bin
+cp dsh-acp/bin/dsh-wait agy-mcp/bin/agy-wait ~/.local/bin/
+chmod +x ~/.local/bin/dsh-wait ~/.local/bin/agy-wait
 ```
 
 ### Registrar no Claude Code
@@ -129,8 +146,9 @@ segurar a conversa por mais tempo.
 | `deepseek_wait(session_id, wait_seconds?)` | bloqueia até uma sessão terminar (default 1h) |
 | `deepseek_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo |
 | `deepseek_status` / `deepseek_result` | status compacto / output acumulado (inclusive parcial) |
+| `deepseek_verify(session_id, command, retries?, ...)` | roda o teste, devolve exit code e reenvia o erro ao agente |
 | `deepseek_cancel` / `deepseek_close` | cancela o turno com relatório parcial / encerra e devolve o parcial |
-| `deepseek_list` | sessões abertas |
+| `deepseek_list` / `deepseek_sessions` | sessões vivas deste processo / sessões persistidas no disco |
 
 ### `agy-mcp`
 
@@ -143,8 +161,9 @@ segurar a conversa por mais tempo.
 | `agy_wait(session_id, wait_seconds?)` | bloqueia até uma sessão terminar (default 10 min) |
 | `agy_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo |
 | `agy_status` / `agy_result` | status compacto / output completo |
-| `agy_cancel` / `agy_close` | cancela / encerra e esquece |
-| `agy_list` | sessões abertas |
+| `agy_verify(session_id, command, retries?, ...)` | roda o teste, devolve exit code e reenvia o erro ao agente |
+| `agy_cancel` / `agy_close` | cancela / encerra e devolve o output parcial |
+| `agy_list` / `agy_conversations` | sessões vivas / conversas persistidas no disco |
 
 Modelos do agy: `gemini-4-argon-low|medium|high` e
 `gemini-3.8-flash-low|medium|high` (default `gemini-3.8-flash-high`);
@@ -165,6 +184,42 @@ Vários em paralelo:
 Regra de ouro: **não intercale `start` e `wait`**. `start A → wait A → start B`
 faz o B só existir depois que o A termina. Inicie todos primeiro (ou use o
 batch) e só então espere.
+
+## Espera sem travar o turno
+
+`deepseek_wait`/`agy_wait` continuam existindo, mas o caminho recomendado é
+rodar o comando de espera em background:
+
+```bash
+dsh-wait <dsh_session_id>
+agy-wait <conversation_id>
+```
+
+O servidor grava `~/.local/state/dsh-acp-mcp/sessions/<uuid>.json` e `.out.txt`
+(e o equivalente em `agy-mcp`) quando o turno muda de estado. `dsh-wait` usa
+`fs.watch`, não polling, e imprime o JSON com o resultado quando termina. Rode
+com o Bash `run_in_background` para o Claude seguir trabalhando e ser acordado
+no fim.
+
+## Perfil e verificação
+
+```json
+deepseek_start(
+  prompt="...",
+  profile={
+    "instructions": "Nunca leia o gabarito. Use a porta 9003.",
+    "writable_dirs": ["data/saida/minha_trilha"],
+    "forbidden_paths": ["data/gold"]
+  },
+  verify_command="pytest tests/ -q",
+  verify_retries=1
+)
+```
+
+No agy, `forbidden_paths` viram `--tmpfs` e `writable_dirs` viram `--bind` no
+`bwrap`. No DSH, o shim coloca um wrapper de `host-spawn` no PATH que bloqueia
+os caminhos proibidos e mounts fora das pastas permitidas. O `verify_command`
+roda no `cwd` e, se falhar, o erro volta para o agente (até `verify_retries`).
 
 ## Retomar após crash/restart
 

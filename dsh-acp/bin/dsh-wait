@@ -1,0 +1,145 @@
+#!/usr/bin/env node
+/**
+ * Wait off-band for one or more DSH/agy sessions to finish.
+ *
+ * The MCP server writes <state-dir>/sessions/<durable-id>.json on every turn
+ * transition and the final output to <durable-id>.out.txt. This command uses
+ * fs.watch (no polling) and exits when all ids are terminal, printing JSON with
+ * each result. Run it with Bash run_in_background to keep the Claude turn free.
+ *
+ * Usage:
+ *   dsh-wait <dsh_session_id> [more ids] [--timeout S] [--max-output N]
+ *   agy-wait <conversation_id> [more ids] [--timeout S] [--max-output N]
+ */
+
+import { existsSync, mkdirSync, readFileSync, watch } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const isAgy = path.basename(process.argv[1]).startsWith("agy");
+const envName = isAgy ? "AGY_STATE_DIR" : "DSH_ACP_STATE_DIR";
+const defaultRoot = path.join(
+  os.homedir(),
+  ".local",
+  "state",
+  isAgy ? "agy-mcp" : "dsh-acp-mcp",
+);
+
+const args = process.argv.slice(2);
+const ids = [];
+let stateRoot = process.env[envName] || defaultRoot;
+let timeoutSeconds = 21_600;
+let maxOutput = 20_000;
+
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if (arg === "--timeout") timeoutSeconds = Number(args[++i]);
+  else if (arg === "--max-output") maxOutput = Number(args[++i]);
+  else if (arg === "--state-dir") stateRoot = args[++i];
+  else if (arg === "-h" || arg === "--help") {
+    console.log(`usage: ${path.basename(process.argv[1])} <id> [id ...] [--timeout S] [--max-output N] [--state-dir DIR]`);
+    process.exit(0);
+  } else if (arg.startsWith("-")) {
+    console.error(`unknown option: ${arg}`);
+    process.exit(2);
+  } else ids.push(arg);
+}
+
+if (ids.length === 0) {
+  console.error(`usage: ${path.basename(process.argv[1])} <id> [id ...] [--timeout S] [--max-output N]`);
+  process.exit(2);
+}
+
+const sessionsDir = path.join(path.resolve(stateRoot), "sessions");
+mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+const terminal = new Set(["idle", "error", "closed"]);
+
+function readState(id) {
+  try {
+    return JSON.parse(readFileSync(path.join(sessionsDir, `${id}.json`), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function isAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readOutput(state) {
+  const file = state.output_file || path.join(sessionsDir, `${state.dsh_session_id || state.conversation_id}.out.txt`);
+  if (!existsSync(file)) return { output: "", truncated: false };
+  try {
+    const raw = readFileSync(file, "utf8");
+    return raw.length > maxOutput
+      ? { output: raw.slice(0, maxOutput), truncated: true }
+      : { output: raw, truncated: false };
+  } catch {
+    return { output: "", truncated: false };
+  }
+}
+
+function snapshot() {
+  return ids.map((id) => {
+    const state = readState(id);
+    if (!state) return { requested_id: id, status: "missing" };
+    if (state.status === "running" && state.shim_pid && isAlive(state.shim_pid) === false) {
+      state.status = "error";
+      state.error = state.error || "the MCP shim that owned this session is gone";
+    }
+    return state;
+  });
+}
+
+let lastProgress = "";
+function check() {
+  const states = snapshot();
+  const pending = states.filter((s) => !terminal.has(s.status));
+  if (pending.length === 0) {
+    const sessions = states.map((state) => {
+      const { output, truncated } = readOutput(state);
+      return { ...state, output, output_truncated: truncated };
+    });
+    const failed = sessions.filter((s) => s.status === "error").length;
+    process.stdout.write(JSON.stringify({ all_done: true, failed, sessions }, null, 2) + "\n");
+    process.exit(failed > 0 ? 1 : 0);
+  }
+  const line = pending.map((s) => `${s.requested_id || s.dsh_session_id || s.conversation_id}=${s.status}`).join(" ");
+  if (line !== lastProgress) {
+    lastProgress = line;
+    process.stderr.write(`[${isAgy ? "agy-wait" : "dsh-wait"}] waiting: ${line}\n`);
+  }
+}
+
+let debounce = null;
+function schedule() {
+  if (debounce) return;
+  debounce = setTimeout(() => {
+    debounce = null;
+    check();
+  }, 50);
+}
+
+check();
+
+const watcher = watch(sessionsDir, { persistent: true }, () => schedule());
+watcher.on("error", (err) => {
+  console.error(`[${isAgy ? "agy-wait" : "dsh-wait"}] watch error: ${err.message}`);
+  process.exit(2);
+});
+
+if (Number.isFinite(timeoutSeconds) && timeoutSeconds > 0) {
+  const timer = setTimeout(() => {
+    const states = snapshot();
+    process.stderr.write(`[${isAgy ? "agy-wait" : "dsh-wait"}] timeout after ${timeoutSeconds}s\n`);
+    process.stdout.write(JSON.stringify({ all_done: false, timeout: true, sessions: states }, null, 2) + "\n");
+    process.exit(2);
+  }, timeoutSeconds * 1000);
+  timer.unref?.();
+}

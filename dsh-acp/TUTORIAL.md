@@ -169,8 +169,8 @@ claude mcp add dsh-acp --scope local \
 
 | Tool | O que faz |
 |---|---|
-| `deepseek_start(prompt, cwd?, mode?, reasoning_effort?, wait?, wait_seconds?)` | cria **uma** sessão e volta em ~3s com `session_id` (`status: running`) |
-| `deepseek_start_many(tasks[])` | cria **N sessões em paralelo** numa única chamada (máx. 12) e devolve os `session_ids` |
+| `deepseek_start(prompt, cwd?, mode?, reasoning_effort?, profile?, verify_command?, wait?, wait_seconds?)` | cria **uma** sessão e volta em ~3s com `session_id` (`status: running`) |
+| `deepseek_start_many(tasks[])` | cria **N sessões em paralelo** numa única chamada (máx. 12), cada task pode ter `profile`, e devolve os `session_ids` |
 | `deepseek_resume(dsh_session_id, prompt, cwd?, ...)` | reata a uma sessão persistida por UUID após restart/crash e manda um prompt |
 | `deepseek_send(session_id, message, wait?, wait_seconds?)` | dispara follow-up e volta; retorna `busy` se o turno anterior ainda roda |
 | `deepseek_wait(session_id, wait_seconds?)` | **bloqueia até uma sessão terminar** (default 1h, máx. 6h) e devolve o resultado |
@@ -178,8 +178,10 @@ claude mcp add dsh-acp --scope local \
 | `deepseek_status(session_id, wait_seconds?)` | **compacto**: estado, tempo, última tool, usage + preview de 400 chars (default sem espera, inclusive parcial) |
 | `deepseek_result(session_id, max_chars?)` | output acumulado, uma vez — inclusive parcial durante o turno ou após erro |
 | `deepseek_cancel(session_id, wait_seconds?)` | interrompe o turno em voo (mesmo com espera estourada), aguarda até 30s e devolve o output parcial |
+| `deepseek_verify(session_id, command, retries?, ...)` | roda o teste, devolve o exit code e reenvia o erro ao agente |
 | `deepseek_close(session_id)` | encerra o processo e esquece a sessão; devolve o output parcial e libera RAM na hora |
-| `deepseek_list()` | lista as sessões abertas |
+| `deepseek_list()` | lista as sessões vivas **deste processo** |
+| `deepseek_sessions(cwd?, limit?)` | lista as sessões persistidas no disco (sobrevivem ao restart) |
 
 **Modos:**
 
@@ -280,6 +282,25 @@ quando terminar; sem isso, o shim fecha sozinho após **30 min ocioso**
 (`DSH_ACP_IDLE_TTL_SECONDS`, default `1800`; `0` desliga). A sessão fechada é
 esquecida pelo shim, mas o histórico fica no disco: use `deepseek_resume` com o
 `dsh_session_id` para continuar.
+
+### Espera em background, perfil e verificação
+
+Para não segurar o turno do Claude, em vez de `deepseek_wait` rode em
+background:
+
+```bash
+dsh-wait <uuid> [<uuid> ...] --timeout 21600
+```
+
+O `dsh-wait` lê `~/.local/state/dsh-acp-mcp/sessions/<uuid>.json`, usa
+`fs.watch` (sem polling) e imprime o resultado no fim. O `profile` da sessão
+aceita `instructions`, `writable_dirs` e `forbidden_paths`; no DSH os caminhos
+viram um wrapper de `host-spawn` que bloqueia a saída por podman. O log de cada
+tool (comando, saída e exit code) fica em `<uuid>.tools.jsonl`.
+
+`verify_command` roda no `cwd` no fim do turno. Se falhar, o erro volta ao
+agente e ele tenta de novo até `verify_retries`; `deepseek_verify` faz o mesmo
+sob demanda e devolve todos os códigos de saída.
 
 ### Retomar depois de crash/restart
 

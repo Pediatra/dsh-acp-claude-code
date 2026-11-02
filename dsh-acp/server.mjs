@@ -8,7 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -62,6 +62,35 @@ const log = (...a) => {
 };
 
 /* ------------------------------------------------------------------ */
+/* Durable per-session state (for the out-of-band dsh-wait command)   */
+/* ------------------------------------------------------------------ */
+
+const STATE_DIR = path.resolve(
+  process.env.DSH_ACP_STATE_DIR || path.join(os.homedir(), ".local", "state", "dsh-acp-mcp"),
+);
+const STATE_SESSIONS_DIR = path.join(STATE_DIR, "sessions");
+
+const safeStateId = (id) => {
+  if (!/^[A-Za-z0-9._-]+$/.test(String(id))) throw new Error(`invalid session id for state: ${id}`);
+  return String(id);
+};
+const statePath = (id) => path.join(STATE_SESSIONS_DIR, `${safeStateId(id)}.json`);
+const outputPath = (id) => path.join(STATE_SESSIONS_DIR, `${safeStateId(id)}.out.txt`);
+const toolLogPath = (id) => path.join(STATE_SESSIONS_DIR, `${safeStateId(id)}.tools.jsonl`);
+
+function writeJsonAtomic(file, value) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
+  renameSync(tmp, file);
+}
+
+try {
+  mkdirSync(STATE_SESSIONS_DIR, { recursive: true, mode: 0o700 });
+} catch (err) {
+  log("state dir unavailable:", err.message);
+}
+
+/* ------------------------------------------------------------------ */
 /* Resolve the dsh binary                                             */
 /* ------------------------------------------------------------------ */
 
@@ -87,19 +116,193 @@ function findDsh() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Tool-call extraction                                               */
+/* ------------------------------------------------------------------ */
+
+function extractToolCommand(input) {
+  if (typeof input === "string") return input;
+  if (!input || typeof input !== "object") return null;
+  for (const key of ["command", "CommandLine", "cmd", "script", "code"]) {
+    if (typeof input[key] === "string") return input[key];
+  }
+  return null;
+}
+
+function extractToolPaths(input) {
+  const found = new Set();
+  const visit = (value, key) => {
+    if (typeof value === "string") {
+      if (/path|file|dir|target|destination|filename|output/i.test(key) && value.trim()) {
+        found.add(value);
+      }
+      if (/^(command|CommandLine)$/.test(key)) {
+        for (const match of value.matchAll(/(?:^|\s)(\/[^\s"'`;|&<>]+)/g)) {
+          found.add(match[1].replace(/[,:]+$/, ""));
+        }
+      }
+    } else if (Array.isArray(value)) {
+      for (const item of value) visit(item, key);
+    } else if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) visit(v, k);
+    }
+  };
+  visit(input, "");
+  return [...found].slice(0, 50);
+}
+
+function compactToolInput(input) {
+  if (input == null) return null;
+  try {
+    const text = JSON.stringify(input);
+    if (text.length <= 4_000) return input;
+    return { truncated: true, chars: text.length, preview: text.slice(0, 4_000) };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeProfile(raw, cwd) {
+  if (!raw || typeof raw !== "object") {
+    return { instructions: "", writable_dirs: [], forbidden_paths: [] };
+  }
+  const resolve = (value) => path.resolve(cwd, String(value));
+  const writable = Array.isArray(raw.writable_dirs) ? raw.writable_dirs.map(resolve) : [];
+  const forbidden = Array.isArray(raw.forbidden_paths) ? raw.forbidden_paths.map(resolve) : [];
+  for (const dir of writable) {
+    try { mkdirSync(dir, { recursive: true }); } catch {}
+  }
+  return {
+    instructions: typeof raw.instructions === "string" ? raw.instructions.trim() : "",
+    writable_dirs: [...new Set(writable)],
+    forbidden_paths: [...new Set(forbidden)],
+  };
+}
+
+function applyProfilePrompt(prompt, profile) {
+  if (!profile || (!profile.instructions && profile.writable_dirs.length === 0 && profile.forbidden_paths.length === 0)) {
+    return prompt;
+  }
+  const lines = ["[PERFIL DA SESSÃO]"];
+  if (profile.instructions) lines.push(profile.instructions);
+  if (profile.writable_dirs.length > 0) lines.push(`Pastas graváveis: ${profile.writable_dirs.join(", ")}`);
+  if (profile.forbidden_paths.length > 0) lines.push(`Caminhos proibidos: ${profile.forbidden_paths.join(", ")}`);
+  lines.push("[FIM DO PERFIL]", "", prompt);
+  return lines.join("\n");
+}
+
+function profileSummary(profile) {
+  if (!profile) return null;
+  return {
+    instructions_chars: profile.instructions.length,
+    writable_dirs: profile.writable_dirs,
+    forbidden_paths: profile.forbidden_paths,
+  };
+}
+
+const HOST_SPAWN_POLICY = `#!/usr/bin/env python3
+import json, os, re, sys
+
+policy_path = os.environ.get("DSH_ACP_PROFILE_FILE")
+real = os.environ.get("DSH_ACP_REAL_HOST_SPAWN", "/usr/bin/host-spawn")
+args = sys.argv[1:]
+if not policy_path or not os.path.exists(policy_path):
+    os.execv(real, [real] + args)
+try:
+    policy = json.load(open(policy_path))
+except Exception:
+    sys.stderr.write("host-spawn policy: cannot read profile\\n")
+    sys.exit(126)
+
+def realpath(value):
+    return os.path.realpath(os.path.expanduser(value))
+
+def inside(value, root):
+    return value == root or value.startswith(root + os.sep)
+
+cwd = realpath(policy.get("cwd", ""))
+forbidden = [realpath(p) for p in policy.get("forbidden_paths", [])]
+writable = [realpath(p) for p in policy.get("writable_dirs", [])]
+joined = " ".join(args)
+
+for path in forbidden:
+    for token in joined.split():
+        token = token.strip("'\\"")
+        if token == path or token.startswith(path + ":") or token.startswith(path + "/"):
+            sys.stderr.write("host-spawn policy: forbidden path: " + path + "\\n")
+            sys.exit(126)
+
+def allow_mount(src):
+    src = realpath(src)
+    if any(inside(src, root) for root in forbidden):
+        return False
+    return inside(src, cwd) or any(inside(src, root) for root in writable)
+
+for i, arg in enumerate(args):
+    spec = None
+    if arg in ("-v", "--volume") and i + 1 < len(args):
+        spec = args[i + 1]
+    elif arg.startswith("--volume="):
+        spec = arg.split("=", 1)[1]
+    elif arg == "--mount" and i + 1 < len(args):
+        match = re.search(r"(?:source|src)=([^,]+)", args[i + 1])
+        if match:
+            spec = match.group(1)
+    elif arg.startswith("--mount"):
+        match = re.search(r"(?:source|src)=([^,]+)", arg)
+        if match:
+            spec = match.group(1)
+    if spec:
+        src = spec.split(":", 1)[0]
+        if not allow_mount(src):
+            sys.stderr.write("host-spawn policy: mount source outside allowed dirs: " + src + "\\n")
+            sys.exit(126)
+
+for match in re.finditer(r"(?:-v|--volume)\\s+([^\\s:]+)", joined):
+    if not allow_mount(match.group(1)):
+        sys.stderr.write("host-spawn policy: mount source outside allowed dirs: " + match.group(1) + "\\n")
+        sys.exit(126)
+
+os.execv(real, [real] + args)
+`;
+
+function toolResultText(update) {
+  const parts = [];
+  for (const block of update.content || []) {
+    if (block?.content?.type === "text" && typeof block.content.text === "string") {
+      parts.push(block.content.text);
+    } else if (typeof block?.text === "string") {
+      parts.push(block.text);
+    }
+  }
+  return parts.join("\n");
+}
+
+function parseExitCode(text) {
+  if (!text) return null;
+  const match = /\[exit code:\s*(-?\d+)\]/i.exec(text)
+    || /(?:exited with code|exit code:?)\s*(-?\d+)/i.exec(text);
+  return match ? Number(match[1]) : null;
+}
+
+/* ------------------------------------------------------------------ */
 /* ACP client (JSON lines over stdio)                                 */
 /* ------------------------------------------------------------------ */
 
 let nextSession = 1;
+const SESSION_PREFIX = (process.env.DSH_ACP_SESSION_PREFIX || Math.random().toString(36).slice(2, 6))
+  .replace(/[^a-z0-9]/gi, "")
+  .slice(0, 6) || "x";
 
 class AcpSession {
-  constructor({ mode, cwd, effort = DEFAULT_EFFORT, resumeSessionId = null }) {
-    this.id = "s" + nextSession++;
+  constructor({ mode, cwd, effort = DEFAULT_EFFORT, resumeSessionId = null, profile = null }) {
+    this.id = `s${SESSION_PREFIX}-${nextSession++}`;
     this.mode = mode;
     this.cwd = cwd;
     this.model = DEFAULT_MODEL;
     this.effort = effort;
     this.resumeSessionId = resumeSessionId;
+    this.profile = profile;
+    this.policyDir = null;
     this.status = "starting";
     this.sessionId = null;
     this.proc = null;
@@ -123,13 +326,36 @@ class AcpSession {
 
     const { cmd, prefix } = findDsh();
     const args = [...prefix, "--profile", "acp", "--patch", OVERLAY];
+
+    let policyFile = null;
+    if (profile && (profile.forbidden_paths.length > 0 || profile.writable_dirs.length > 0)) {
+      try {
+        this.policyDir = path.join(STATE_DIR, "policy", `${this.id}-${process.pid}`);
+        mkdirSync(this.policyDir, { recursive: true, mode: 0o700 });
+        policyFile = path.join(this.policyDir, "profile.json");
+        writeFileSync(policyFile, JSON.stringify({ cwd: this.cwd, ...profile }, null, 2) + "\n", { mode: 0o600 });
+        writeFileSync(path.join(this.policyDir, "host-spawn"), HOST_SPAWN_POLICY, { mode: 0o755 });
+      } catch (err) {
+        log("policy setup failed:", err.message);
+        this.policyDir = null;
+        policyFile = null;
+      }
+    }
+    const childPath = [this.policyDir, path.dirname(process.execPath), process.env.PATH]
+      .filter(Boolean)
+      .join(":");
+
     this.proc = spawn(cmd, args, {
       cwd: this.cwd,
       env: {
         ...process.env,
-        PATH: `${path.dirname(process.execPath)}:${process.env.PATH ?? ""}`,
+        PATH: childPath,
         DSH_PERMISSION_MODE: mode === "workspace-write" ? "workspace-write" : "read-only",
         NO_COLOR: "1",
+        ...(policyFile ? {
+          DSH_ACP_PROFILE_FILE: policyFile,
+          DSH_ACP_REAL_HOST_SPAWN: process.env.DSH_ACP_REAL_HOST_SPAWN || "/usr/bin/host-spawn",
+        } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -210,14 +436,52 @@ class AcpSession {
         const t = u.content?.text;
         if (typeof t === "string") this.output += t;
       } else if (u.sessionUpdate === "tool_call") {
-        this.lastTool = { title: u.title || u.kind || "tool", status: u.status || "pending" };
-        this.toolCalls.push({ ...this.lastTool });
+        const title = u.title || u.kind || "tool";
+        const command = extractToolCommand(u.rawInput);
+        const paths = extractToolPaths(u.rawInput);
+        this.lastTool = { title, status: u.status || "pending", command, tool_call_id: u.toolCallId };
+        this.toolCalls.push({
+          tool_call_id: u.toolCallId,
+          title,
+          status: u.status || "pending",
+          command,
+          paths,
+          exit_code: null,
+        });
+        this.recordTool({
+          event: "tool_call",
+          tool_call_id: u.toolCallId,
+          title,
+          kind: u.kind,
+          status: u.status || "pending",
+          command,
+          paths,
+          raw_input: compactToolInput(u.rawInput),
+        });
       } else if (u.sessionUpdate === "tool_call_update") {
-        const last = this.toolCalls[this.toolCalls.length - 1];
-        if (last && u.status) {
-          last.status = u.status;
-          this.lastTool = { ...last };
+        const text = toolResultText(u);
+        const exitCode = parseExitCode(text) ?? (u.status === "completed" ? 0 : null);
+        const call = this.toolCalls.find((t) => t.tool_call_id === u.toolCallId);
+        if (call) {
+          if (u.status) call.status = u.status;
+          call.exit_code = exitCode;
+          call.output_chars = text.length;
+          this.lastTool = {
+            title: call.title,
+            status: call.status,
+            command: call.command,
+            exit_code: call.exit_code,
+            tool_call_id: call.tool_call_id,
+          };
         }
+        this.recordTool({
+          event: "tool_call_update",
+          tool_call_id: u.toolCallId,
+          status: u.status,
+          exit_code: exitCode,
+          output_chars: text.length,
+          output_preview: text.slice(0, 4_000),
+        });
       } else if (u.sessionUpdate === "usage_update") {
         this.usage = { used: u.used, size: u.size };
       }
@@ -240,6 +504,66 @@ class AcpSession {
     log("unhandled acp message:", JSON.stringify(msg).slice(0, 300));
   }
 
+  /** Persist the state the out-of-band dsh-wait command reads. */
+  writeState(extra = {}) {
+    if (!this.sessionId) return;
+    try {
+      writeJsonAtomic(statePath(this.sessionId), {
+        ...this.basePayload(),
+        wait_command: `dsh-wait ${this.sessionId}`,
+        output_file: outputPath(this.sessionId),
+        tool_log: toolLogPath(this.sessionId),
+        shim_pid: process.pid,
+        acp_pid: this.proc?.pid ?? null,
+        updated_at: new Date().toISOString(),
+        ...extra,
+      });
+    } catch (err) {
+      log("state write failed:", err.message);
+    }
+  }
+
+  writeOutput() {
+    if (!this.sessionId) return;
+    try {
+      writeFileSync(outputPath(this.sessionId), this.output ?? "", { mode: 0o600 });
+    } catch (err) {
+      log("output write failed:", err.message);
+    }
+  }
+
+  /** Append one tool lifecycle event to the per-session JSONL log. */
+  recordTool(entry) {
+    if (!this.sessionId) return;
+    try {
+      appendFileSync(toolLogPath(this.sessionId), JSON.stringify({
+        time: new Date().toISOString(),
+        session_id: this.id,
+        dsh_session_id: this.sessionId,
+        ...entry,
+      }) + "\n", { mode: 0o600 });
+    } catch (err) {
+      log("tool log write failed:", err.message);
+    }
+  }
+
+  /** Compact replacement for the old full tool_calls array in results. */
+  toolSummary() {
+    const byStatus = {};
+    for (const t of this.toolCalls) {
+      const status = t.status || "unknown";
+      byStatus[status] = (byStatus[status] || 0) + 1;
+    }
+    const files = [...new Set(this.toolCalls.flatMap((t) => t.paths || []))];
+    return {
+      count: this.toolCalls.length,
+      by_status: byStatus,
+      changed_files: files.slice(0, 50),
+      changed_files_truncated: files.length > 50,
+      log: this.sessionId ? toolLogPath(this.sessionId) : null,
+    };
+  }
+
   fail(err) {
     if (this.status === "error") return;
     this.status = "error";
@@ -251,6 +575,8 @@ class AcpSession {
       p.reject(new Error(this.error));
     }
     this.promptPending = false;
+    this.writeOutput();
+    this.writeState();
     this.finishTurn();
   }
 
@@ -345,6 +671,7 @@ class AcpSession {
     if (typeof currentEffort === "string") this.effort = currentEffort;
 
     this.status = "idle";
+    this.writeState();
   }
 
   prompt(text) {
@@ -363,6 +690,7 @@ class AcpSession {
     this.promptPending = true;
     const turn = ++this.turnSeq;
     this.turnDone = new Promise((resolve) => { this.turnResolve = resolve; });
+    this.writeState();
     // No client-side timeout: a slow turn must not turn into a fake transport
     // error. The ACP response still owns the turn's real end, even if every
     // deepseek_wait window expired meanwhile.
@@ -385,6 +713,8 @@ class AcpSession {
         if (this.closed || this.turnSeq !== turn) return;
         this.promptPending = false;
         this.cancelRequestedAt = null;
+        this.writeOutput();
+        this.writeState();
         this.finishTurn();
       });
   }
@@ -417,12 +747,15 @@ class AcpSession {
       cwd: this.cwd,
       model: this.model,
       reasoning_effort: this.effort,
+      profile: profileSummary(this.profile),
       elapsed_seconds: this.elapsedSeconds(),
       stop_reason: this.stopReason,
       last_tool: this.lastTool,
       output_chars: this.output.length,
       usage: this.usage,
       error: this.error,
+      wait_command: this.sessionId ? `dsh-wait ${this.sessionId}` : null,
+      state_file: this.sessionId ? statePath(this.sessionId) : null,
     };
   }
 
@@ -456,7 +789,12 @@ class AcpSession {
     const p = this.basePayload();
     p.output = this.output.length > maxChars ? this.output.slice(0, maxChars) : this.output;
     p.truncated = this.output.length > maxChars;
-    p.tool_calls = this.toolCalls;
+    const tools = this.toolSummary();
+    p.tool_calls_count = tools.count;
+    p.tool_calls_by_status = tools.by_status;
+    p.changed_files = tools.changed_files;
+    p.changed_files_truncated = tools.changed_files_truncated;
+    p.tool_log = tools.log;
     p.has_result = this.output.length > 0;
     return p;
   }
@@ -471,6 +809,8 @@ class AcpSession {
     // otherwise leaves the wait pending until its own timeout.
     this.status = "closed";
     this.stopReason = "closed";
+    this.writeOutput();
+    this.writeState();
     this.finishTurn();
     try {
       if (this.sessionId) {
@@ -543,6 +883,7 @@ async function createSession(args, { resumeSessionId = null } = {}) {
   const mode = args.mode === "read-only" ? "read-only" : "workspace-write";
   const cwd = resolveCwd(args.cwd);
   const effort = ALLOWED_EFFORTS.has(args.reasoning_effort) ? args.reasoning_effort : DEFAULT_EFFORT;
+  const profile = normalizeProfile(args.profile, cwd);
   if (resumeSessionId) {
     for (const s of sessions.values()) {
       if (s.sessionId === resumeSessionId) {
@@ -550,11 +891,11 @@ async function createSession(args, { resumeSessionId = null } = {}) {
       }
     }
   }
-  const session = new AcpSession({ mode, cwd, effort, resumeSessionId });
+  const session = new AcpSession({ mode, cwd, effort, resumeSessionId, profile });
   sessions.set(session.id, session);
   try {
     await session.init({ configure: !resumeSessionId });
-    session.prompt(String(args.prompt));
+    session.prompt(applyProfilePrompt(String(args.prompt), profile));
     return session;
   } catch (err) {
     sessions.delete(session.id);
@@ -567,8 +908,20 @@ async function toolStart(args, progressToken) {
   const session = await createSession(args);
   const wait = resolveWait(args);
   if (wait > 0) await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, "deepseek_start"));
-  if (!session.busy) return session.resultPayload();
-  return session.statusPayload();
+  let verification = null;
+  if (args.verify_command) {
+    verification = wait > 0
+      ? await verifySession(session, {
+        command: args.verify_command,
+        retries: args.verify_retries,
+        timeout: args.verify_timeout_seconds,
+        wait,
+      }, progressToken, "deepseek_start: verify")
+      : { command: args.verify_command, pending: true, note: "set wait_seconds>0 or call deepseek_verify after the turn" };
+  }
+  const payload = session.busy ? session.statusPayload() : session.resultPayload();
+  if (verification) payload.verification = verification;
+  return payload;
 }
 
 /**
@@ -583,8 +936,33 @@ async function toolResume(args, progressToken) {
   const session = await createSession(args, { resumeSessionId: dshSessionId });
   const wait = resolveWait(args);
   if (wait > 0) await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, "deepseek_resume"));
-  if (!session.busy) return session.resultPayload();
-  return session.statusPayload();
+  let verification = null;
+  if (args.verify_command) {
+    verification = wait > 0
+      ? await verifySession(session, {
+        command: args.verify_command,
+        retries: args.verify_retries,
+        timeout: args.verify_timeout_seconds,
+        wait,
+      }, progressToken, "deepseek_resume: verify")
+      : { command: args.verify_command, pending: true, note: "set wait_seconds>0 or call deepseek_verify after the turn" };
+  }
+  const payload = session.busy ? session.statusPayload() : session.resultPayload();
+  if (verification) payload.verification = verification;
+  return payload;
+}
+
+async function toolVerify(args, progressToken) {
+  const session = needSession(args.session_id);
+  const verification = await verifySession(session, {
+    command: args.command,
+    retries: args.retries,
+    timeout: args.timeout_seconds,
+    wait: clampWait(args.wait_seconds, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS),
+  }, progressToken, "deepseek_verify");
+  const payload = session.busy ? session.statusPayload() : session.resultPayload();
+  payload.verification = verification;
+  return payload;
 }
 
 /**
@@ -658,6 +1036,120 @@ function needSession(id) {
   const s = sessions.get(String(id));
   if (!s) throw new Error(`unknown session_id: ${id}`);
   return s;
+}
+
+function dshSessionsRoot(cwd) {
+  const encoded = "-" + cwd.replaceAll("/", "-") + "--";
+  return path.join(os.homedir(), ".dsh", "sessions", encoded);
+}
+
+function listPersistedDshSessions(cwd, limit) {
+  const root = dshSessionsRoot(cwd);
+  if (!existsSync(root)) return [];
+  const rows = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const file = path.join(root, entry.name, "session.v4.jsonl.zstd");
+    if (!existsSync(file)) continue;
+    const stat = statSync(file);
+    rows.push({
+      dsh_session_id: entry.name,
+      cwd,
+      updated_at: new Date(stat.mtimeMs).toISOString(),
+      size_bytes: stat.size,
+      log: file,
+    });
+  }
+  rows.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  return rows.slice(0, limit);
+}
+
+function truncateText(text, max = 20_000) {
+  return text.length > max ? text.slice(0, max) + "\n…[truncated]" : text;
+}
+
+/** Run the user's verification command on the host, capturing its exit code. */
+function runCommandCapture(command, cwd, timeoutSeconds = 600) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const child = spawn("bash", ["-lc", command], {
+      cwd,
+      env: { ...process.env, NO_COLOR: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timer = null;
+    let settled = false;
+    const finish = (exitCode, timedOut = false, spawnError = null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({
+        command,
+        exit_code: exitCode,
+        timed_out: timedOut,
+        stdout: truncateText(stdout),
+        stderr: truncateText(stderr || spawnError || ""),
+        duration_ms: Date.now() - started,
+      });
+    };
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (err) => finish(127, false, err.message));
+    child.on("exit", (code, signal) => finish(code ?? (signal ? 128 : 1)));
+    timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch {}
+      finish(124, true);
+    }, Math.max(1, timeoutSeconds) * 1000);
+  });
+}
+
+/** Run the verification command; on failure, send the error back to the agent. */
+async function verifySession(session, options, progressToken, label) {
+  const command = String(options.command || "").trim();
+  if (!command) return null;
+  const retries = Math.max(0, Math.min(Number(options.retries) || 0, 5));
+  const timeout = Math.max(1, Math.min(Number(options.timeout) || 600, 3600));
+  const wait = Math.max(1, Math.min(Number(options.wait) || DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS));
+  const attempts = [];
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (session.busy) {
+      await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, `${label}: wait`));
+    }
+    if (session.busy) {
+      return { command, ok: false, pending: true, exit_code: attempts.at(-1)?.exit_code ?? null, attempts, note: "session still running; call deepseek_verify again or deepseek_wait" };
+    }
+    if (session.status !== "idle") {
+      return { command, ok: false, exit_code: attempts.at(-1)?.exit_code ?? null, attempts, note: `session status=${session.status}` };
+    }
+    const result = await runCommandCapture(command, session.cwd, timeout);
+    attempts.push(result);
+    if (result.exit_code === 0) {
+      return { command, ok: true, exit_code: 0, attempts };
+    }
+    if (attempt === retries) {
+      return { command, ok: false, exit_code: result.exit_code, attempts };
+    }
+    session.prompt(
+      `A verificação automática falhou (exit ${result.exit_code}). Corrija e termine o trabalho.\n` +
+      `Comando: ${command}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+  }
+  return { command, ok: false, attempts };
+}
+
+async function toolSessions(args) {
+  const cwd = resolveCwd(args.cwd);
+  const limit = Math.max(1, Math.min(Number(args.limit) || 50, 200));
+  const rows = listPersistedDshSessions(cwd, limit);
+  return {
+    cwd,
+    sessions: rows,
+    count: rows.length,
+    note: "Persisted sessions survive restarts. Resume one with deepseek_resume(dsh_session_id=..., prompt=...).",
+  };
 }
 
 async function toolSend(args, progressToken) {
@@ -755,6 +1247,16 @@ async function toolList() {
 /* MCP stdio server                                                   */
 /* ------------------------------------------------------------------ */
 
+const PROFILE_SCHEMA = {
+  type: "object",
+  description: "Per-session guardrails. Paths are relative to cwd or absolute.",
+  properties: {
+    instructions: { type: "string", description: "Default text prepended to this prompt." },
+    writable_dirs: { type: "array", items: { type: "string" }, description: "Extra directories this session may write." },
+    forbidden_paths: { type: "array", items: { type: "string" }, description: "Paths this session must not use (hidden/denied)." },
+  },
+};
+
 const TOOLS = [
   {
     name: "deepseek_start",
@@ -775,6 +1277,10 @@ const TOOLS = [
         cwd: { type: "string", description: "Working directory inside the project (default: project root)." },
         mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
         reasoning_effort: { type: "string", enum: ["off", "low", "high", "max"], description: "default max" },
+        profile: PROFILE_SCHEMA,
+        verify_command: { type: "string", description: "Optional test command; if it exits non-zero, the agent gets the error and can retry." },
+        verify_retries: { type: "number", description: "0-5; default 0" },
+        verify_timeout_seconds: { type: "number", description: "default 600" },
         wait: { type: "boolean", description: "false (default) = return immediately with session_id; true = block here instead of using deepseek_wait." },
         wait_seconds: { type: "number", description: "0-21600; explicit blocking wait (overrides wait)." },
       },
@@ -802,6 +1308,7 @@ const TOOLS = [
               cwd: { type: "string", description: "Working directory inside the project (default: project root)." },
               mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
               reasoning_effort: { type: "string", enum: ["off", "low", "high", "max"], description: "default max" },
+              profile: PROFILE_SCHEMA,
             },
             required: ["prompt"],
           },
@@ -825,6 +1332,10 @@ const TOOLS = [
         prompt: { type: "string", description: "Message to send on resume, e.g. 'Continue de onde parou'" },
         cwd: { type: "string", description: "Must match the session's original cwd (default: project root)" },
         mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
+        profile: PROFILE_SCHEMA,
+        verify_command: { type: "string", description: "Optional test command; if it exits non-zero, the agent gets the error and can retry." },
+        verify_retries: { type: "number", description: "0-5; default 0" },
+        verify_timeout_seconds: { type: "number", description: "default 600" },
         wait: { type: "boolean", description: "false (default) = return immediately; true = block here." },
         wait_seconds: { type: "number", description: "0-21600; explicit blocking wait." },
       },
@@ -910,6 +1421,23 @@ const TOOLS = [
     },
   },
   {
+    name: "deepseek_verify",
+    description:
+      "Run a test command in the session's cwd and return its exit code. If it fails, send the error back to the agent " +
+      "and retry up to retries times. Use after deepseek_wait, or set verify_command on start/resume.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        command: { type: "string" },
+        retries: { type: "number", description: "0-5; default 0" },
+        timeout_seconds: { type: "number", description: "default 600" },
+        wait_seconds: { type: "number", description: "how long to wait for the current turn; default 3600" },
+      },
+      required: ["session_id", "command"],
+    },
+  },
+  {
     name: "deepseek_cancel",
     description:
       "Interrupt the turn that is actually in flight, including one whose wait window expired. Sends ACP " +
@@ -939,8 +1467,21 @@ const TOOLS = [
   },
   {
     name: "deepseek_list",
-    description: "List DeepSeek sessions started by this MCP server.",
+    description: "List DeepSeek sessions started by THIS MCP server process (live only; empty after a restart). Use deepseek_sessions for persisted sessions.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "deepseek_sessions",
+    description:
+      "List persisted DeepSeek sessions for a workspace (reads the durable session store; survives restarts). " +
+      "Use the returned dsh_session_id with deepseek_resume.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cwd: { type: "string", description: "Workspace directory (default: project root)" },
+        limit: { type: "number", description: "1-200; default 50" },
+      },
+    },
   },
 ];
 
@@ -959,9 +1500,11 @@ async function callTool(name, args, progressToken) {
     case "deepseek_wait_all": return textResult(await toolWaitAll(args, progressToken));
     case "deepseek_status": return textResult(await toolStatus(args, progressToken));
     case "deepseek_result": return textResult(await toolResult(args));
+    case "deepseek_verify": return textResult(await toolVerify(args, progressToken));
     case "deepseek_cancel": return textResult(await toolCancel(args));
     case "deepseek_close": return textResult(await toolClose(args));
     case "deepseek_list": return textResult(await toolList());
+    case "deepseek_sessions": return textResult(await toolSessions(args));
     default: return textResult(`unknown tool: ${name}`, true);
   }
 }

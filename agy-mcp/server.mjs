@@ -12,7 +12,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,6 +53,122 @@ const log = (...a) => {
   if (DEBUG) process.stderr.write("[agy-mcp] " + a.join(" ") + "\n");
 };
 
+/* ------------------------------------------------------------------ */
+/* Durable per-session state (for the out-of-band agy-wait command)   */
+/* ------------------------------------------------------------------ */
+
+const STATE_DIR = path.resolve(
+  process.env.AGY_STATE_DIR || path.join(HOME, ".local", "state", "agy-mcp"),
+);
+const STATE_SESSIONS_DIR = path.join(STATE_DIR, "sessions");
+
+const safeStateId = (id) => {
+  if (!/^[A-Za-z0-9._-]+$/.test(String(id))) throw new Error(`invalid session id for state: ${id}`);
+  return String(id);
+};
+const statePath = (id) => path.join(STATE_SESSIONS_DIR, `${safeStateId(id)}.json`);
+const outputPath = (id) => path.join(STATE_SESSIONS_DIR, `${safeStateId(id)}.out.txt`);
+const toolLogPath = (id) => path.join(STATE_SESSIONS_DIR, `${safeStateId(id)}.tools.jsonl`);
+
+function writeJsonAtomic(file, value) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
+  renameSync(tmp, file);
+}
+
+function extractToolCommand(input) {
+  if (typeof input === "string") return input;
+  if (!input || typeof input !== "object") return null;
+  for (const key of ["CommandLine", "command", "cmd", "script", "code"]) {
+    if (typeof input[key] === "string") return input[key];
+  }
+  return null;
+}
+
+function extractToolPaths(input) {
+  const found = new Set();
+  const visit = (value, key) => {
+    if (typeof value === "string") {
+      if (/path|file|dir|target|destination|filename|output/i.test(key) && value.trim()) {
+        found.add(value);
+      }
+      if (/^(command|CommandLine)$/.test(key)) {
+        for (const match of value.matchAll(/(?:^|\s)(\/[^\s"'`;|&<>]+)/g)) {
+          found.add(match[1].replace(/[,:]+$/, ""));
+        }
+      }
+    } else if (Array.isArray(value)) {
+      for (const item of value) visit(item, key);
+    } else if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) visit(v, k);
+    }
+  };
+  visit(input, "");
+  return [...found].slice(0, 50);
+}
+
+function compactToolInput(input) {
+  if (input == null) return null;
+  try {
+    const text = JSON.stringify(input);
+    if (text.length <= 4_000) return input;
+    return { truncated: true, chars: text.length, preview: text.slice(0, 4_000) };
+  } catch {
+    return null;
+  }
+}
+
+function parseExitCode(text) {
+  if (!text) return null;
+  const match = /(?:exited with code|exit code:?)\s*(-?\d+)/i.exec(text)
+    || /\[exit code:\s*(-?\d+)\]/i.exec(text);
+  return match ? Number(match[1]) : null;
+}
+
+function normalizeProfile(raw, cwd) {
+  if (!raw || typeof raw !== "object") {
+    return { instructions: "", writable_dirs: [], forbidden_paths: [] };
+  }
+  const resolve = (value) => path.resolve(cwd, String(value));
+  const writable = Array.isArray(raw.writable_dirs) ? raw.writable_dirs.map(resolve) : [];
+  const forbidden = Array.isArray(raw.forbidden_paths) ? raw.forbidden_paths.map(resolve) : [];
+  for (const dir of writable) {
+    try { mkdirSync(dir, { recursive: true }); } catch {}
+  }
+  return {
+    instructions: typeof raw.instructions === "string" ? raw.instructions.trim() : "",
+    writable_dirs: [...new Set(writable)],
+    forbidden_paths: [...new Set(forbidden)],
+  };
+}
+
+function applyProfilePrompt(prompt, profile) {
+  if (!profile || (!profile.instructions && profile.writable_dirs.length === 0 && profile.forbidden_paths.length === 0)) {
+    return prompt;
+  }
+  const lines = ["[PERFIL DA SESSÃO]"];
+  if (profile.instructions) lines.push(profile.instructions);
+  if (profile.writable_dirs.length > 0) lines.push(`Pastas graváveis: ${profile.writable_dirs.join(", ")}`);
+  if (profile.forbidden_paths.length > 0) lines.push(`Caminhos proibidos: ${profile.forbidden_paths.join(", ")}`);
+  lines.push("[FIM DO PERFIL]", "", prompt);
+  return lines.join("\n");
+}
+
+function profileSummary(profile) {
+  if (!profile) return null;
+  return {
+    instructions_chars: profile.instructions.length,
+    writable_dirs: profile.writable_dirs,
+    forbidden_paths: profile.forbidden_paths,
+  };
+}
+
+try {
+  mkdirSync(STATE_SESSIONS_DIR, { recursive: true, mode: 0o700 });
+} catch (err) {
+  log("state dir unavailable:", err.message);
+}
+
 function findAgy() {
   const explicit = process.env.AGY_BIN;
   if (explicit && existsSync(explicit)) return explicit;
@@ -66,7 +182,7 @@ const AGY = findAgy();
 /* Command construction                                               */
 /* ------------------------------------------------------------------ */
 
-function buildSpawn({ mode, model, effort, cwd, conversationId }) {
+function buildSpawn({ mode, model, effort, cwd, conversationId, profile }) {
   const agyArgs = [
     "--print=",
     "--input-format", "stream-json",
@@ -104,6 +220,17 @@ function buildSpawn({ mode, model, effort, cwd, conversationId }) {
   } else {
     bwrapArgs.push("--ro-bind", cwd, cwd);
   }
+  for (const dir of profile?.writable_dirs || []) {
+    if (dir === cwd) continue;
+    bwrapArgs.push("--bind", dir, dir);
+  }
+  for (const forbidden of profile?.forbidden_paths || []) {
+    if (!existsSync(forbidden)) continue;
+    let isDir = false;
+    try { isDir = statSync(forbidden).isDirectory(); } catch {}
+    if (isDir) bwrapArgs.push("--tmpfs", forbidden);
+    else bwrapArgs.push("--ro-bind", "/dev/null", forbidden);
+  }
   bwrapArgs.push("--chdir", cwd, AGY, ...agyArgs);
   return { cmd: BWRAP, args: bwrapArgs, cwd };
 }
@@ -113,15 +240,20 @@ function buildSpawn({ mode, model, effort, cwd, conversationId }) {
 /* ------------------------------------------------------------------ */
 
 let nextSession = 1;
+const SESSION_PREFIX = (process.env.AGY_SESSION_PREFIX || Math.random().toString(36).slice(2, 6))
+  .replace(/[^a-z0-9]/gi, "")
+  .slice(0, 6) || "x";
 
 class AgySession {
-  constructor({ mode, modeRequested, cwd, model, effort, conversationId = null }) {
-    this.id = "g" + nextSession++;
+  constructor({ mode, modeRequested, cwd, model, effort, effortSource = "default", conversationId = null, profile = null }) {
+    this.id = `g${SESSION_PREFIX}-${nextSession++}`;
     this.mode = mode;
     this.modeRequested = modeRequested || mode;
     this.cwd = cwd;
     this.model = model;
     this.effort = effort;
+    this.effortSource = effortSource;
+    this.profile = profile;
     this.status = "starting";
     this.conversationId = conversationId;
     this.permissionMode = null;
@@ -131,6 +263,7 @@ class AgySession {
     this.streamText = "";
     this.lastTool = null;
     this.toolCalls = [];
+    this.activeTools = new Map();
     this.usage = null;
     this.denied = null;
     this.stopReason = null;
@@ -140,6 +273,8 @@ class AgySession {
     this.turnResolve = null;
     this.cancelled = false;
     this.closed = false;
+    this.emptyRetryUsed = false;
+    this.retryNote = null;
     this.idleTimer = null;
   }
 
@@ -150,6 +285,7 @@ class AgySession {
       effort: this.effort,
       cwd: this.cwd,
       conversationId: this.conversationId,
+      profile: this.profile,
     });
     this.proc = spawn(cmd, args, {
       cwd,
@@ -200,15 +336,62 @@ class AgySession {
       this.conversationId = m.conversation_id || this.conversationId;
       this.permissionMode = m.init?.permission_mode || this.permissionMode;
       if (m.init?.model) this.model = m.init.model;
+      this.writeState();
       return;
     }
     if (m.event === "step_update") {
       const u = m.step_update;
       if (!u) return;
       if (u.step_type === "tool") {
-        this.lastTool = { name: u.tool_name, state: u.state };
-        if (u.state === "DONE") {
-          this.toolCalls.push({ name: u.tool_name, state: u.state });
+        const key = `${u.step_index}:${u.tool_name}`;
+        const params = u.tool_info?.parameters;
+        if (u.state === "ACTIVE") {
+          const command = extractToolCommand(params);
+          const paths = extractToolPaths(params);
+          this.activeTools.set(key, {
+            tool_name: u.tool_name,
+            state: "ACTIVE",
+            command,
+            paths,
+            exit_code: null,
+          });
+          this.lastTool = { name: u.tool_name, state: u.state, command };
+          this.recordTool({
+            event: "tool_call",
+            step_index: u.step_index,
+            tool_name: u.tool_name,
+            state: u.state,
+            command,
+            paths,
+            parameters: compactToolInput(params),
+          });
+        } else if (u.state === "DONE") {
+          const output = u.tool_info?.output || "";
+          const exitCode = parseExitCode(output);
+          const active = this.activeTools.get(key) || {};
+          this.toolCalls.push({
+            ...active,
+            tool_name: u.tool_name,
+            state: "DONE",
+            exit_code: exitCode,
+            output_chars: output.length,
+          });
+          this.activeTools.delete(key);
+          this.lastTool = {
+            name: u.tool_name,
+            state: u.state,
+            command: active.command,
+            exit_code: exitCode,
+          };
+          this.recordTool({
+            event: "tool_call_update",
+            step_index: u.step_index,
+            tool_name: u.tool_name,
+            state: u.state,
+            exit_code: exitCode,
+            output_chars: output.length,
+            output_preview: output.slice(0, 4_000),
+          });
         }
       } else if (u.step_type === "agent_response" && typeof u.text_delta === "string") {
         this.streamText += u.text_delta;
@@ -223,16 +406,110 @@ class AgySession {
       this.usage = r.usage || this.usage;
       this.stopReason = r.status || null;
       this.denied = r.denied_actions || null;
+      const text = this.output || this.streamText || "";
+      const denied = Array.isArray(this.denied) ? this.denied : [];
+
+      if (r.status === "SUCCESS" && !String(text).trim()) {
+        this.status = "error";
+        this.error = denied.length > 0
+          ? `agy returned SUCCESS with empty text after denied action(s): ${denied.join(", ")}`
+          : "agy returned SUCCESS with empty text";
+        if (!this.emptyRetryUsed && denied.length > 0) {
+          this.emptyRetryUsed = true;
+          this.retryNote = "empty SUCCESS after a denied action; retrying once without commands";
+          this.writeOutput();
+          this.writeState();
+          this.finishTurn();
+          setTimeout(() => {
+            if (this.closed || this.status === "running") return;
+            this.startTurn(
+              "A resposta anterior veio vazia porque uma ação foi negada. Responda agora apenas com o texto final, sem executar comandos.",
+              { internal: true },
+            );
+          }, 100);
+          return;
+        }
+        this.retryNote = this.emptyRetryUsed ? "empty SUCCESS persisted after one retry" : null;
+        this.writeOutput();
+        this.writeState();
+        this.finishTurn();
+        return;
+      }
+
       this.status = r.status === "SUCCESS" ? "idle" : "error";
       if (r.status !== "SUCCESS") this.error = r.error || r.status || "agy error";
+      else this.error = null;
+      this.retryNote = null;
+      this.writeOutput();
+      this.writeState();
       this.finishTurn();
     }
+  }
+
+  /** Persist the state the out-of-band agy-wait command reads. */
+  writeState(extra = {}) {
+    if (!this.conversationId) return;
+    try {
+      writeJsonAtomic(statePath(this.conversationId), {
+        ...this.basePayload(),
+        wait_command: `agy-wait ${this.conversationId}`,
+        output_file: outputPath(this.conversationId),
+        tool_log: toolLogPath(this.conversationId),
+        shim_pid: process.pid,
+        agy_pid: this.proc?.pid ?? null,
+        updated_at: new Date().toISOString(),
+        ...extra,
+      });
+    } catch (err) {
+      log("state write failed:", err.message);
+    }
+  }
+
+  writeOutput() {
+    if (!this.conversationId) return;
+    try {
+      writeFileSync(outputPath(this.conversationId), this.output || this.streamText || "", { mode: 0o600 });
+    } catch (err) {
+      log("output write failed:", err.message);
+    }
+  }
+
+  recordTool(entry) {
+    if (!this.conversationId) return;
+    try {
+      appendFileSync(toolLogPath(this.conversationId), JSON.stringify({
+        time: new Date().toISOString(),
+        session_id: this.id,
+        conversation_id: this.conversationId,
+        ...entry,
+      }) + "\n", { mode: 0o600 });
+    } catch (err) {
+      log("tool log write failed:", err.message);
+    }
+  }
+
+  toolSummary() {
+    const byStatus = {};
+    for (const t of this.toolCalls) {
+      const status = t.state || "unknown";
+      byStatus[status] = (byStatus[status] || 0) + 1;
+    }
+    const files = [...new Set(this.toolCalls.flatMap((t) => t.paths || []))];
+    return {
+      count: this.toolCalls.length,
+      by_status: byStatus,
+      changed_files: files.slice(0, 50),
+      changed_files_truncated: files.length > 50,
+      log: this.conversationId ? toolLogPath(this.conversationId) : null,
+    };
   }
 
   fail(err) {
     if (this.status === "error") return;
     this.status = "error";
     this.error = err?.message || String(err);
+    this.writeOutput();
+    this.writeState();
     this.finishTurn();
   }
 
@@ -256,17 +533,21 @@ class AgySession {
   /** Free the agy process after idle; a later send resumes via --conversation. */
   scheduleIdleClose() {
     this.clearIdleTimer();
-    if (IDLE_TTL_SECONDS <= 0 || this.status === "running") return;
+    if (this.closed || IDLE_TTL_SECONDS <= 0 || this.status === "running") return;
     this.idleTimer = setTimeout(() => {
-      if (this.status === "running") return;
+      if (this.closed || this.status === "running") return;
       log(`idle TTL (${IDLE_TTL_SECONDS}s): closing ${this.id}`);
       this.close();
     }, IDLE_TTL_SECONDS * 1000);
     this.idleTimer.unref?.();
   }
 
-  startTurn(text) {
+  startTurn(text, { internal = false } = {}) {
     if (this.status === "running") throw new Error("session is busy; wait for the current turn");
+    if (!internal) {
+      this.emptyRetryUsed = false;
+      this.retryNote = null;
+    }
     this.clearIdleTimer();
     this.closed = false;
     this.ensureProcess();
@@ -274,12 +555,14 @@ class AgySession {
     this.streamText = "";
     this.lastTool = null;
     this.toolCalls = [];
+    this.activeTools = new Map();
     this.denied = null;
     this.error = null;
     this.stopReason = null;
     this.turnStartedAt = Date.now();
     this.status = "running";
     this.turnDone = new Promise((resolve) => { this.turnResolve = resolve; });
+    this.writeState();
     this.proc.stdin.write(JSON.stringify({
       event: "user",
       message: { role: "user", content: text },
@@ -314,6 +597,8 @@ class AgySession {
       cwd: this.cwd,
       model: this.model,
       effort: this.effort,
+      effort_source: this.effortSource,
+      profile: profileSummary(this.profile),
       closed: this.closed,
       elapsed_seconds: this.elapsedSeconds(),
       stop_reason: this.stopReason,
@@ -322,6 +607,10 @@ class AgySession {
       usage: this.usage,
       denied_actions: this.denied,
       error: this.error,
+      empty_retry_used: this.emptyRetryUsed,
+      retry_note: this.retryNote,
+      wait_command: this.conversationId ? `agy-wait ${this.conversationId}` : null,
+      state_file: this.conversationId ? statePath(this.conversationId) : null,
     };
     if (this.modeRequested !== this.mode) {
       p.mode_requested = this.modeRequested;
@@ -349,7 +638,12 @@ class AgySession {
     const text = this.output || this.streamText;
     p.output = text.length > maxChars ? text.slice(0, maxChars) : text;
     p.truncated = text.length > maxChars;
-    p.tool_calls = this.toolCalls;
+    const tools = this.toolSummary();
+    p.tool_calls_count = tools.count;
+    p.tool_calls_by_status = tools.by_status;
+    p.changed_files = tools.changed_files;
+    p.changed_files_truncated = tools.changed_files_truncated;
+    p.tool_log = tools.log;
     p.has_result = text.length > 0;
     return p;
   }
@@ -360,6 +654,8 @@ class AgySession {
     this.proc = null;
     this.status = "cancelled";
     this.stopReason = "cancelled";
+    this.writeOutput();
+    this.writeState();
     this.finishTurn();
   }
 
@@ -367,8 +663,13 @@ class AgySession {
     this.closed = true;
     this.clearIdleTimer();
     this.cancelled = true;
+    this.status = "closed";
+    this.stopReason = "closed";
+    this.writeOutput();
+    this.writeState();
     try { this.proc?.kill("SIGKILL"); } catch {}
     this.proc = null;
+    this.finishTurn();
   }
 }
 
@@ -408,6 +709,11 @@ function normalizeEffort(raw) {
   return EFFORTS.includes(raw) ? raw : DEFAULT_EFFORT;
 }
 
+function effortFromModel(model) {
+  const match = /-(low|medium|high)$/.exec(model || "");
+  return match ? match[1] : null;
+}
+
 function sendProgress(progressToken, session, label) {
   if (progressToken === undefined || progressToken === null) return;
   const elapsed = session.elapsedSeconds();
@@ -432,14 +738,17 @@ async function createSession(args, { conversationId = null } = {}) {
   }
   const cwd = resolveCwd(args.cwd);
   const model = normalizeModel(args.model);
-  const effort = normalizeEffort(args.effort);
-  const session = new AgySession({ mode, modeRequested, cwd, model, effort, conversationId });
+  const modelLevel = effortFromModel(model);
+  const effort = modelLevel || normalizeEffort(args.effort);
+  const effortSource = modelLevel ? "model" : (args.effort !== undefined ? "argument" : "default");
+  const profile = normalizeProfile(args.profile, cwd);
+  const session = new AgySession({ mode, modeRequested, cwd, model, effort, effortSource, conversationId, profile });
   sessions.set(session.id, session);
   try {
     session.spawnProcess();
     // Wait briefly for the init event / session bootstrap.
     await new Promise((r) => setTimeout(r, 800));
-    session.startTurn(String(args.prompt));
+    session.startTurn(applyProfilePrompt(String(args.prompt), profile));
     return session;
   } catch (err) {
     sessions.delete(session.id);
@@ -448,12 +757,98 @@ async function createSession(args, { conversationId = null } = {}) {
   }
 }
 
+function truncateText(text, max = 20_000) {
+  return text.length > max ? text.slice(0, max) + "\n…[truncated]" : text;
+}
+
+function runCommandCapture(command, cwd, timeoutSeconds = 600) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const child = spawn("bash", ["-lc", command], {
+      cwd,
+      env: { ...process.env, NO_COLOR: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timer = null;
+    let settled = false;
+    const finish = (exitCode, timedOut = false, spawnError = null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({
+        command,
+        exit_code: exitCode,
+        timed_out: timedOut,
+        stdout: truncateText(stdout),
+        stderr: truncateText(stderr || spawnError || ""),
+        duration_ms: Date.now() - started,
+      });
+    };
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (err) => finish(127, false, err.message));
+    child.on("exit", (code, signal) => finish(code ?? (signal ? 128 : 1)));
+    timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch {}
+      finish(124, true);
+    }, Math.max(1, timeoutSeconds) * 1000);
+  });
+}
+
+async function verifySession(session, options, progressToken, label) {
+  const command = String(options.command || "").trim();
+  if (!command) return null;
+  const retries = Math.max(0, Math.min(Number(options.retries) || 0, 5));
+  const timeout = Math.max(1, Math.min(Number(options.timeout) || 600, 3600));
+  const wait = Math.max(1, Math.min(Number(options.wait) || DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS));
+  const attempts = [];
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (session.status === "running") {
+      await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, `${label}: wait`));
+    }
+    if (session.status === "running") {
+      return { command, ok: false, pending: true, exit_code: attempts.at(-1)?.exit_code ?? null, attempts, note: "session still running; call agy_verify again or agy_wait" };
+    }
+    if (session.status !== "idle") {
+      return { command, ok: false, exit_code: attempts.at(-1)?.exit_code ?? null, attempts, note: `session status=${session.status}` };
+    }
+    const result = await runCommandCapture(command, session.cwd, timeout);
+    attempts.push(result);
+    if (result.exit_code === 0) {
+      return { command, ok: true, exit_code: 0, attempts };
+    }
+    if (attempt === retries) {
+      return { command, ok: false, exit_code: result.exit_code, attempts };
+    }
+    session.startTurn(
+      `A verificação automática falhou (exit ${result.exit_code}). Corrija e termine o trabalho.\n` +
+      `Comando: ${command}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+  }
+  return { command, ok: false, attempts };
+}
+
 async function toolStart(args, progressToken) {
   const session = await createSession(args);
   const wait = clampWait(args.wait_seconds, args.wait ? DEFAULT_WAIT_SECONDS : 0, MAX_WAIT_SECONDS);
   if (wait > 0) await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, "agy_start"));
-  if (session.status === "idle") return session.resultPayload();
-  return session.statusPayload();
+  let verification = null;
+  if (args.verify_command) {
+    verification = wait > 0
+      ? await verifySession(session, {
+        command: args.verify_command,
+        retries: args.verify_retries,
+        timeout: args.verify_timeout_seconds,
+        wait,
+      }, progressToken, "agy_start: verify")
+      : { command: args.verify_command, pending: true, note: "set wait_seconds>0 or call agy_verify after the turn" };
+  }
+  const payload = session.status !== "running" ? session.resultPayload() : session.statusPayload();
+  if (verification) payload.verification = verification;
+  return payload;
 }
 
 /**
@@ -468,8 +863,33 @@ async function toolResume(args, progressToken) {
   const session = await createSession(args, { conversationId });
   const wait = clampWait(args.wait_seconds, args.wait ? DEFAULT_WAIT_SECONDS : 0, MAX_WAIT_SECONDS);
   if (wait > 0) await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, "agy_resume"));
-  if (session.status === "idle") return session.resultPayload();
-  return session.statusPayload();
+  let verification = null;
+  if (args.verify_command) {
+    verification = wait > 0
+      ? await verifySession(session, {
+        command: args.verify_command,
+        retries: args.verify_retries,
+        timeout: args.verify_timeout_seconds,
+        wait,
+      }, progressToken, "agy_resume: verify")
+      : { command: args.verify_command, pending: true, note: "set wait_seconds>0 or call agy_verify after the turn" };
+  }
+  const payload = session.status !== "running" ? session.resultPayload() : session.statusPayload();
+  if (verification) payload.verification = verification;
+  return payload;
+}
+
+async function toolVerify(args, progressToken) {
+  const session = needSession(args.session_id);
+  const verification = await verifySession(session, {
+    command: args.command,
+    retries: args.retries,
+    timeout: args.timeout_seconds,
+    wait: clampWait(args.wait_seconds, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS),
+  }, progressToken, "agy_verify");
+  const payload = session.status !== "running" ? session.resultPayload() : session.statusPayload();
+  payload.verification = verification;
+  return payload;
 }
 
 /** Start every task concurrently, in one call, so N agents really run together. */
@@ -508,13 +928,61 @@ function needSession(id) {
   return s;
 }
 
+async function toolConversations(args) {
+  const cwd = args.cwd ? resolveCwd(args.cwd) : null;
+  const limit = Math.max(1, Math.min(Number(args.limit) || 50, 200));
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch (err) {
+    throw new Error("node:sqlite is unavailable: " + err.message);
+  }
+  const dbPath = path.join(HOME, ".gemini", "antigravity-cli", "conversation_summaries.db");
+  if (!existsSync(dbPath)) {
+    return { cwd, conversations: [], count: 0, note: "agy conversation database not found" };
+  }
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const rows = db.prepare(
+      "select conversation_id, title, status, not_fully_idle, last_modified_time, last_user_input_time, workspace_uris " +
+      "from conversation_summaries order by last_modified_time desc limit ?",
+    ).all(limit);
+    const want = cwd ? `file://${cwd}` : null;
+    const conversations = rows
+      .filter((row) => !want || String(row.workspace_uris || "").includes(want))
+      .map((row) => {
+        let workspace = row.workspace_uris;
+        try { workspace = JSON.parse(row.workspace_uris); } catch {}
+        return {
+          conversation_id: row.conversation_id,
+          title: row.title,
+          status: row.status,
+          busy: Boolean(row.not_fully_idle),
+          last_modified_time: row.last_modified_time,
+          last_user_input_time: row.last_user_input_time,
+          workspace,
+        };
+      });
+    return {
+      cwd,
+      conversations,
+      count: conversations.length,
+      note: "Use agy_resume(conversation_id=..., prompt=...) to continue one.",
+    };
+  } finally {
+    db.close();
+  }
+}
+
 async function toolSend(args, progressToken) {
   const s = needSession(args.session_id);
-  if (s.status === "running") return { status: "busy", ...s.statusPayload() };
+  if (s.status === "running") {
+    return { ...s.statusPayload(), busy: true, note: "a turn is still in flight; this message was NOT queued. Wait with agy_wait or interrupt with agy_cancel first." };
+  }
   s.startTurn(String(args.message));
   const wait = clampWait(args.wait_seconds, args.wait ? DEFAULT_WAIT_SECONDS : 0, MAX_WAIT_SECONDS);
   if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "agy_send"));
-  if (s.status === "idle") return s.resultPayload();
+  if (s.status !== "running") return s.resultPayload();
   return s.statusPayload();
 }
 
@@ -522,7 +990,7 @@ async function toolWait(args, progressToken) {
   const s = needSession(args.session_id);
   const wait = clampWait(args.wait_seconds, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
   if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "agy_wait"));
-  if (s.status === "idle") return s.resultPayload();
+  if (s.status !== "running") return s.resultPayload();
   return s.statusPayload();
 }
 
@@ -538,11 +1006,12 @@ async function toolWaitAll(args, progressToken) {
       return { session_id: id, status: "unknown", error: err.message || String(err) };
     }
     if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "agy_wait_all"));
-    return s.status === "idle" ? s.resultPayload() : s.statusPayload();
+    return s.status !== "running" ? s.resultPayload() : s.statusPayload();
   }));
   const done = out.filter((x) => x.status === "idle").length;
+  const failed = out.filter((x) => ["error", "cancelled", "closed", "unknown"].includes(x.status)).length;
   const running = out.filter((x) => x.status === "running").length;
-  const res = { sessions: out, done, running, all_done: done === out.length };
+  const res = { sessions: out, done, failed, running, all_done: done + failed === out.length };
   if (running > 0) {
     res.hint = "some sessions are still running; call agy_wait_all again with the remaining ids";
     res.remaining = out.filter((x) => x.status === "running").map((x) => x.session_id);
@@ -569,18 +1038,20 @@ async function toolResult(args) {
 async function toolCancel(args) {
   const s = needSession(args.session_id);
   s.cancel();
-  return { status: "cancelled", ...s.statusPayload() };
+  return { ...s.resultPayload(), status: "cancelled" };
 }
 
 async function toolClose(args) {
   const s = needSession(args.session_id);
+  const final = s.resultPayload();
+  final.partial = s.status === "running";
   if (s.status === "running") s.cancel();
   s.close();
   sessions.delete(s.id);
   return {
+    ...final,
     status: "closed",
-    session_id: s.id,
-    conversation_id: s.conversationId,
+    closed: true,
     note: "process terminated and session forgotten; start a new session for more work",
   };
 }
@@ -592,6 +1063,16 @@ async function toolList() {
 /* ------------------------------------------------------------------ */
 /* MCP stdio                                                         */
 /* ------------------------------------------------------------------ */
+
+const PROFILE_SCHEMA = {
+  type: "object",
+  description: "Per-session guardrails. Paths are relative to cwd or absolute.",
+  properties: {
+    instructions: { type: "string", description: "Default text prepended to this prompt." },
+    writable_dirs: { type: "array", items: { type: "string" }, description: "Extra directories this session may write." },
+    forbidden_paths: { type: "array", items: { type: "string" }, description: "Paths this session must not use (hidden/denied)." },
+  },
+};
 
 const TOOLS = [
   {
@@ -610,6 +1091,10 @@ const TOOLS = [
         mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
         model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL}` },
         effort: { type: "string", enum: EFFORTS, description: `default ${DEFAULT_EFFORT}` },
+        profile: PROFILE_SCHEMA,
+        verify_command: { type: "string", description: "Optional test command; if it exits non-zero, the agent gets the error and can retry." },
+        verify_retries: { type: "number", description: "0-5; default 0" },
+        verify_timeout_seconds: { type: "number", description: "default 600" },
         wait: { type: "boolean", description: "false (default) = return immediately; true = block here (up to 10 min)." },
         wait_seconds: { type: "number", description: "0-3600; explicit blocking wait." },
       },
@@ -637,6 +1122,7 @@ const TOOLS = [
               mode: { type: "string", enum: ["read-only", "workspace-write"] },
               model: { type: "string", enum: MODELS },
               effort: { type: "string", enum: EFFORTS },
+              profile: PROFILE_SCHEMA,
             },
             required: ["prompt"],
           },
@@ -661,6 +1147,10 @@ const TOOLS = [
         mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
         model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL}` },
         effort: { type: "string", enum: EFFORTS, description: `default ${DEFAULT_EFFORT}` },
+        profile: PROFILE_SCHEMA,
+        verify_command: { type: "string", description: "Optional test command; if it exits non-zero, the agent gets the error and can retry." },
+        verify_retries: { type: "number", description: "0-5; default 0" },
+        verify_timeout_seconds: { type: "number", description: "default 600" },
         wait: { type: "boolean", description: "false (default) = return immediately; true = block here." },
         wait_seconds: { type: "number", description: "0-3600; explicit blocking wait." },
       },
@@ -736,6 +1226,23 @@ const TOOLS = [
     },
   },
   {
+    name: "agy_verify",
+    description:
+      "Run a test command in the session's cwd and return its exit code. If it fails, send the error back to the agent " +
+      "and retry up to retries times. Use after agy_wait, or set verify_command on start/resume.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string" },
+        command: { type: "string" },
+        retries: { type: "number", description: "0-5; default 0" },
+        timeout_seconds: { type: "number", description: "default 600" },
+        wait_seconds: { type: "number", description: "how long to wait for the current turn; default 600" },
+      },
+      required: ["session_id", "command"],
+    },
+  },
+  {
     name: "agy_cancel",
     description: "Cancel the current turn (kills the process; the conversation stays resumable).",
     inputSchema: {
@@ -758,8 +1265,21 @@ const TOOLS = [
   },
   {
     name: "agy_list",
-    description: "List agy sessions started by this MCP server.",
+    description: "List agy sessions started by THIS MCP server process (live only; empty after a restart). Use agy_conversations for persisted conversations.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "agy_conversations",
+    description:
+      "List persisted agy conversations from the local conversation database (survives restarts), newest first. " +
+      "Use the returned conversation_id with agy_resume.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cwd: { type: "string", description: "Workspace directory (default: project root)" },
+        limit: { type: "number", description: "1-200; default 50" },
+      },
+    },
   },
 ];
 
@@ -778,9 +1298,11 @@ async function callTool(name, args, progressToken) {
     case "agy_wait_all": return textResult(await toolWaitAll(args, progressToken));
     case "agy_status": return textResult(await toolStatus(args, progressToken));
     case "agy_result": return textResult(await toolResult(args));
+    case "agy_verify": return textResult(await toolVerify(args, progressToken));
     case "agy_cancel": return textResult(await toolCancel(args));
     case "agy_close": return textResult(await toolClose(args));
     case "agy_list": return textResult(await toolList());
+    case "agy_conversations": return textResult(await toolConversations(args));
     default: return textResult(`unknown tool: ${name}`, true);
   }
 }

@@ -33,17 +33,19 @@ No Desktop, reinicie o app ou abra uma sessão nova; em sessão aberta:
 
 | Tool | O que faz |
 |---|---|
-| `agy_start(prompt, cwd?, mode?, model?, effort?, wait?, wait_seconds?)` | abre **uma** sessão e volta rápido com `session_id` |
-| `agy_start_many(tasks[])` | abre **N sessões em paralelo** numa chamada (máx. 12) |
+| `agy_start(prompt, cwd?, mode?, model?, effort?, profile?, verify_command?, wait?, wait_seconds?)` | abre **uma** sessão e volta rápido com `session_id` |
+| `agy_start_many(tasks[])` | abre **N sessões em paralelo** numa chamada (máx. 12), cada task pode ter `profile` |
 | `agy_resume(conversation_id, prompt, ...)` | reata a uma conversa persistida por UUID após restart/crash |
 | `agy_send(session_id, message, wait?, wait_seconds?)` | follow-up; respawna a sessão se ela foi fechada por TTL |
 | `agy_wait(session_id, wait_seconds?)` | bloqueia até o turno terminar (default 10 min, máx. 1h) |
 | `agy_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo (tempo = a mais lenta) |
 | `agy_status(session_id, wait_seconds?)` | compacto: estado, tempo, última tool, usage, denied; preview de 400 chars |
 | `agy_result(session_id, max_chars?)` | output completo do último turno, uma vez |
-| `agy_cancel(session_id)` | mata o processo; a conversa continua resumível |
-| `agy_close(session_id)` | encerra e esquece a sessão (libera RAM na hora) |
-| `agy_list()` | sessões abertas |
+| `agy_verify(session_id, command, retries?, ...)` | roda o teste, devolve o exit code e reenvia o erro ao agente |
+| `agy_cancel(session_id)` | mata o processo e devolve o output parcial; a conversa continua resumível |
+| `agy_close(session_id)` | encerra, devolve o output parcial e esquece a sessão (libera RAM na hora) |
+| `agy_list()` | sessões vivas **deste processo** |
+| `agy_conversations(cwd?, limit?)` | conversas persistidas no disco (sobrevivem ao restart) |
 
 ## Paralelismo e TTL
 
@@ -53,6 +55,27 @@ No Desktop, reinicie o app ou abra uma sessão nova; em sessão aberta:
   sozinha após **30 min** (`AGY_IDLE_TTL_SECONDS`, default `1800`; `0` desliga).
   Um `agy_send` depois respawna com `--conversation` e mantém o contexto.
 - `agy_close` encerra e **esquece** a sessão; para continuar, abra outra.
+
+## Espera, perfil, log e verificação
+
+Para não segurar o turno do Claude, rode a espera em background:
+
+```bash
+agy-wait <conversation_id> [<outro-id> ...] --timeout 21600
+```
+
+O shim grava `~/.local/state/agy-mcp/sessions/<uuid>.json` e `.out.txt`; o
+`agy-wait` usa `fs.watch` e imprime o resultado no fim.
+
+`profile` aceita `instructions`, `writable_dirs` e `forbidden_paths`. No agy,
+pastas graváveis viram `--bind` e caminhos proibidos viram `--tmpfs` (ficam
+ocultos). O log de tools fica em `<uuid>.tools.jsonl` com comando, saída e exit
+code; o resultado devolve só contagem e arquivos mudados.
+
+`verify_command` roda no `cwd` no fim do turno; se falhar, o erro volta ao
+agente e ele tenta de novo até `verify_retries`. `agy_verify` faz o mesmo sob
+demanda. Se o resultado vier `SUCCESS` com texto vazio e ação negada, o shim
+marca erro e reenvia uma vez pedindo a resposta sem comandos.
 
 ## Retomar após restart/crash
 
