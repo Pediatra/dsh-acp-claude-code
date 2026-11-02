@@ -114,6 +114,9 @@ class AcpSession {
     this.lastTool = null;
     this.turnDone = null;
     this.turnResolve = null;
+    this.promptPending = false;
+    this.turnSeq = 0;
+    this.cancelRequestedAt = null;
     this.closed = false;
     this.idleTimer = null;
 
@@ -142,23 +145,33 @@ class AcpSession {
   }
 
   send(obj) {
-    if (!this.proc?.stdin?.writable) return;
+    if (!this.proc?.stdin?.writable) return false;
     this.proc.stdin.write(JSON.stringify(obj) + "\n");
+    return true;
   }
 
   request(method, params, timeoutMs = 60_000) {
     const id = this.nextRpc++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`ACP ${method} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+      let timer = null;
+      // timeoutMs <= 0 means "no client-side deadline": use it for the prompt
+      // request, whose duration is unbounded. deepseek_wait owns the deadline.
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`ACP ${method} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }
       this.pending.set(id, {
         method,
-        resolve: (v) => { clearTimeout(timer); resolve(v); },
-        reject: (e) => { clearTimeout(timer); reject(e); },
+        resolve: (v) => { if (timer) clearTimeout(timer); resolve(v); },
+        reject: (e) => { if (timer) clearTimeout(timer); reject(e); },
       });
-      this.send({ jsonrpc: "2.0", id, method, params });
+      if (!this.send({ jsonrpc: "2.0", id, method, params })) {
+        this.pending.delete(id);
+        if (timer) clearTimeout(timer);
+        reject(new Error(`ACP ${method}: transport stdin is not writable`));
+      }
     });
   }
 
@@ -230,7 +243,19 @@ class AcpSession {
     if (this.status === "error") return;
     this.status = "error";
     this.error = err.message || String(err);
+    // A dead transport never answers its pending requests: reject them now so
+    // no detached prompt promise stays pending forever.
+    for (const [id, p] of this.pending) {
+      this.pending.delete(id);
+      p.reject(new Error(this.error));
+    }
+    this.promptPending = false;
     this.finishTurn();
+  }
+
+  /** True while an ACP prompt request is still in flight, regardless of status. */
+  get busy() {
+    return this.promptPending || this.status === "running";
   }
 
   finishTurn() {
@@ -253,9 +278,9 @@ class AcpSession {
   /** Free the ACP process after an idle window; the session is then forgotten. */
   scheduleIdleClose() {
     this.clearIdleTimer();
-    if (this.closed || IDLE_TTL_SECONDS <= 0 || this.status === "running") return;
+    if (this.closed || IDLE_TTL_SECONDS <= 0 || this.busy) return;
     this.idleTimer = setTimeout(() => {
-      if (this.status === "running") return;
+      if (this.busy) return;
       log(`idle TTL (${IDLE_TTL_SECONDS}s): closing ${this.id}`);
       this.close().catch(() => {});
       sessions.delete(this.id);
@@ -300,30 +325,45 @@ class AcpSession {
   }
 
   prompt(text) {
-    if (this.status === "running") throw new Error("session is busy; wait for the current turn to finish");
+    if (this.busy) {
+      throw new Error("session is busy; call deepseek_wait to keep waiting, or deepseek_cancel to interrupt the current turn");
+    }
     this.clearIdleTimer();
     this.output = "";
     this.toolCalls = [];
     this.stopReason = null;
     this.error = null;
     this.lastTool = null;
+    this.cancelRequestedAt = null;
     this.turnStartedAt = Date.now();
     this.status = "running";
+    this.promptPending = true;
+    const turn = ++this.turnSeq;
     this.turnDone = new Promise((resolve) => { this.turnResolve = resolve; });
+    // No client-side timeout: a slow turn must not turn into a fake transport
+    // error. The ACP response still owns the turn's real end, even if every
+    // deepseek_wait window expired meanwhile.
     this.request(
       "session/prompt",
       { sessionId: this.sessionId, prompt: [{ type: "text", text }] },
-      3_600_000,
+      0,
     )
       .then((r) => {
+        if (this.closed || this.turnSeq !== turn) return;
         this.stopReason = r?.stopReason ?? "end_turn";
         this.status = "idle";
       })
       .catch((e) => {
+        if (this.closed || this.turnSeq !== turn) return;
         this.error = e.message || String(e);
         this.status = "error";
       })
-      .finally(() => this.finishTurn());
+      .finally(() => {
+        if (this.closed || this.turnSeq !== turn) return;
+        this.promptPending = false;
+        this.cancelRequestedAt = null;
+        this.finishTurn();
+      });
   }
 
   async waitForTurn(seconds, onTick) {
@@ -363,17 +403,27 @@ class AcpSession {
     };
   }
 
-  /** Compact: never returns the full output while running. */
+  /** Compact: a short preview only; full text comes from deepseek_result. */
   statusPayload() {
     const p = this.basePayload();
     p.has_result = this.output.length > 0;
-    if (this.status === "running") {
-      p.hint = `still running; call deepseek_wait with wait_seconds (up to ${MAX_WAIT_SECONDS}) instead of tight polling`;
-      p.next = `deepseek_wait(session_id="${this.id}", wait_seconds=${DEFAULT_WAIT_SECONDS})`;
-    } else if (this.output.length > 0) {
+    p.partial = this.busy;
+    if (this.output.length > 0) {
       const max = 400;
       p.output_preview = this.output.length > max ? this.output.slice(0, max) : this.output;
       if (this.output.length > max) p.output_preview_truncated = true;
+      if (this.busy) p.output_preview_partial = true;
+    }
+    if (this.cancelRequestedAt) {
+      p.cancel_requested = true;
+      p.hint = "cancellation requested; the agent has not acknowledged it yet";
+      p.next = `deepseek_cancel(session_id="${this.id}") or deepseek_wait(session_id="${this.id}")`;
+    } else if (this.busy) {
+      p.hint = `still running; call deepseek_wait with wait_seconds (up to ${MAX_WAIT_SECONDS}) instead of tight polling`;
+      p.next = `deepseek_wait(session_id="${this.id}", wait_seconds=${DEFAULT_WAIT_SECONDS})`;
+    } else if (this.status === "error") {
+      p.hint = "turn failed; deepseek_result still returns the partial output produced before the failure";
+      p.next = `deepseek_result(session_id="${this.id}")`;
     }
     return p;
   }
@@ -391,6 +441,9 @@ class AcpSession {
   async close() {
     this.closed = true;
     this.clearIdleTimer();
+    // Invalidate the detached prompt callbacks before killing the process.
+    this.turnSeq++;
+    this.promptPending = false;
     // Resolve any pending deepseek_wait/status immediately: killing the process
     // otherwise leaves the wait pending until its own timeout.
     this.status = "closed";
@@ -404,6 +457,7 @@ class AcpSession {
       try { this.proc?.kill("SIGKILL"); } catch {}
       this.proc = null;
       this.buf = "";
+      this.pending.clear();
     }
   }
 }
@@ -483,7 +537,7 @@ async function toolStart(args, progressToken) {
   const session = await createSession(args);
   const wait = resolveWait(args);
   if (wait > 0) await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, "deepseek_start"));
-  if (session.status === "idle") return session.resultPayload();
+  if (!session.busy) return session.resultPayload();
   return session.statusPayload();
 }
 
@@ -534,15 +588,17 @@ async function toolWaitAll(args, progressToken) {
       return { session_id: id, status: "unknown", error: err.message || String(err) };
     }
     if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "deepseek_wait_all"));
-    return s.status === "idle" ? s.resultPayload() : s.statusPayload();
+    return s.busy ? s.statusPayload() : s.resultPayload();
   }));
   const done = out.filter((x) => x.status === "idle").length;
   const running = out.filter((x) => x.status === "running").length;
+  const failed = out.filter((x) => ["error", "closed", "unknown"].includes(x.status)).length;
   const res = {
     sessions: out,
     done,
+    failed,
     running,
-    all_done: done === out.length,
+    all_done: done + failed === out.length,
   };
   if (running > 0) {
     const still = out.filter((x) => x.status === "running").map((x) => x.session_id);
@@ -560,11 +616,17 @@ function needSession(id) {
 
 async function toolSend(args, progressToken) {
   const s = needSession(args.session_id);
-  if (s.status === "running") return { status: "busy", ...s.statusPayload() };
+  if (s.busy) {
+    return {
+      ...s.statusPayload(),
+      busy: true,
+      note: "a turn is still in flight; this message was NOT queued. Wait with deepseek_wait or interrupt with deepseek_cancel first.",
+    };
+  }
   s.prompt(String(args.message));
   const wait = resolveWait(args);
   if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "deepseek_send"));
-  if (s.status === "idle") return s.resultPayload();
+  if (!s.busy) return s.resultPayload();
   return s.statusPayload();
 }
 
@@ -572,7 +634,7 @@ async function toolWait(args, progressToken) {
   const s = needSession(args.session_id);
   const wait = clampWait(args.wait_seconds, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
   if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "deepseek_wait"));
-  if (s.status === "idle") return s.resultPayload();
+  if (!s.busy) return s.resultPayload();
   return s.statusPayload();
 }
 
@@ -585,30 +647,56 @@ async function toolStatus(args, progressToken) {
 
 async function toolResult(args) {
   const s = needSession(args.session_id);
-  if (s.status === "running") {
-    return { status: "running", session_id: s.id, message: "still running; use deepseek_status" };
-  }
   const max = clampWait(args.max_chars, 20_000, 50_000) || 20_000;
-  return s.resultPayload(max);
+  const payload = s.resultPayload(max);
+  payload.partial = s.busy;
+  if (s.busy) {
+    payload.note = "turn still running: this is the output produced so far. Call deepseek_wait to block; never send a new prompt before this turn ends.";
+  }
+  return payload;
 }
 
-async function toolCancel(args) {
+async function toolCancel(args, progressToken) {
   const s = needSession(args.session_id);
+  if (!s.busy) {
+    return {
+      ...s.resultPayload(),
+      cancel_requested: false,
+      note: "no turn in flight; nothing to cancel",
+    };
+  }
+  s.cancelRequestedAt = Date.now();
   s.notify("session/cancel", { sessionId: s.sessionId });
-  return { status: "cancelling", ...s.statusPayload() };
+  const wait = clampWait(args.wait_seconds, 30, 300);
+  if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "deepseek_cancel"));
+  if (!s.busy) {
+    const payload = s.resultPayload();
+    payload.cancel_requested = true;
+    payload.cancelled = s.stopReason === "cancelled";
+    return payload;
+  }
+  const payload = s.statusPayload();
+  payload.cancel_requested = true;
+  payload.cancelled = false;
+  payload.note = "cancel delivered, but the agent has not stopped yet. Do not send a new prompt; call deepseek_cancel again or keep waiting.";
+  return payload;
 }
 
 async function toolClose(args) {
   const s = needSession(args.session_id);
-  if (s.status === "running") {
+  // Capture the report before killing the process: close is often the last
+  // resort after a cancel, and the partial output must not disappear with it.
+  const final = s.resultPayload(20_000);
+  final.partial = s.busy;
+  if (s.busy) {
     s.notify("session/cancel", { sessionId: s.sessionId });
   }
   await s.close();
   sessions.delete(s.id);
   return {
+    ...final,
     status: "closed",
-    session_id: s.id,
-    conversation_id: s.conversationId,
+    closed: true,
     note: "process terminated and session forgotten; start a new session for more work",
   };
 }
@@ -695,7 +783,8 @@ const TOOLS = [
     name: "deepseek_send",
     description:
       "Dispatch a follow-up message to an existing DeepSeek session and return immediately. Follow with " +
-      "deepseek_wait(session_id). Returns busy if a turn is still running.",
+      "deepseek_wait(session_id). Returns busy without queuing the message if a turn is still running — " +
+      "an expired wait window does NOT free the session; wait again or call deepseek_cancel first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -713,8 +802,8 @@ const TOOLS = [
       "Block until ONE session's current turn finishes (default 1h, max 6h) and return the full result. " +
       "For several sessions use deepseek_wait_all (it waits on all of them concurrently). Claude Code moves a call " +
       "still running after a few seconds to a background task and wakes you with the result when it settles, so " +
-      "this is the notification mechanism. If it returns status=running (wait window expired), call it again once " +
-      "with a large wait_seconds; never loop with short waits.",
+      "this is the notification mechanism. If it returns status=running (wait window expired), the turn is still " +
+      "alive: call deepseek_wait again once with a large wait_seconds; never send a new prompt or loop with short waits.",
     inputSchema: {
       type: "object",
       properties: {
@@ -741,8 +830,8 @@ const TOOLS = [
   {
     name: "deepseek_result",
     description:
-      "Return the full output of the last completed turn (up to max_chars). Call once when you actually need the text; " +
-      "use deepseek_status for cheap polling.",
+      "Return the output accumulated so far (up to max_chars), including partial output while a turn is still " +
+      "running or after a turn failed. Use deepseek_status for cheap polling; use deepseek_wait to block.",
     inputSchema: {
       type: "object",
       properties: {
@@ -754,10 +843,16 @@ const TOOLS = [
   },
   {
     name: "deepseek_cancel",
-    description: "Cancel the current turn of a DeepSeek session.",
+    description:
+      "Interrupt the turn that is actually in flight, including one whose wait window expired. Sends ACP " +
+      "session/cancel and waits up to wait_seconds (default 30s) for the agent to stop; returns the partial output " +
+      "so the final report is not lost. If it still says cancel_requested, do not send a new prompt — wait or cancel again.",
     inputSchema: {
       type: "object",
-      properties: { session_id: { type: "string" } },
+      properties: {
+        session_id: { type: "string" },
+        wait_seconds: { type: "number", description: "0-300; how long to wait for the agent to stop (default 30)" },
+      },
       required: ["session_id"],
     },
   },
@@ -765,6 +860,7 @@ const TOOLS = [
     name: "deepseek_close",
     description:
       "Close a finished session now: cancel the turn if running, terminate its ACP process and forget the session. " +
+      "Returns the output accumulated so far (partial if the turn was interrupted) so the report is not lost. " +
       "Use it when done with an agent to free memory/processes. Sessions are also auto-closed after an idle TTL " +
       "(DSH_ACP_IDLE_TTL_SECONDS, default 1800s; 0 disables).",
     inputSchema: {

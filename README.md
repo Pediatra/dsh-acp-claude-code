@@ -26,8 +26,13 @@ background e notifica no fim) e fecha a sessão quando termina.
   esperam todas ao mesmo tempo (tempo = a mais lenta, não a soma).
 - **Sem polling:** a chamada de `wait` é o canal de aviso. O Claude Code
   auto-backgrounda após 8s e acorda o modelo quando o turno termina.
+- **Turno longo não vira erro:** o `session/prompt` não tem timeout no cliente;
+  a janela é só do `wait`. Estourou, a sessão continua `running` e o resultado
+  atrasado ainda é capturado.
 - **Interrupção não mata a sessão:** cancelar a tool call não cancela o turno
   do agente; dá para retomar com `list` + `wait`.
+- **Cancelamento real:** `*_cancel` interrompe o turno em voo, espera o agente
+  parar e devolve o output parcial, sem perder o relatório.
 - **Read-only real:** `bwrap` monta `/` read-only e o workspace read-only; no
   DSH, toda permissão é rejeitada.
 - **Limpeza:** `*_close` encerra na hora; TTL ocioso fecha sozinho após 30 min.
@@ -122,8 +127,8 @@ segurar a conversa por mais tempo.
 | `deepseek_send(session_id, message, ...)` | follow-up na mesma sessão |
 | `deepseek_wait(session_id, wait_seconds?)` | bloqueia até uma sessão terminar (default 1h) |
 | `deepseek_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo |
-| `deepseek_status` / `deepseek_result` | status compacto / output completo |
-| `deepseek_cancel` / `deepseek_close` | cancela o turno / encerra e esquece |
+| `deepseek_status` / `deepseek_result` | status compacto / output acumulado (inclusive parcial) |
+| `deepseek_cancel` / `deepseek_close` | cancela o turno com relatório parcial / encerra e devolve o parcial |
 | `deepseek_list` | sessões abertas |
 
 ### `agy-mcp`

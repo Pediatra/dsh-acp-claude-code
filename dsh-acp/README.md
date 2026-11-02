@@ -12,10 +12,10 @@ Ponte MCP entre Claude Code e o **DeepSeek Harness** oficial, usando o ACP
 | `deepseek_send(session_id, message, wait?, wait_seconds?)` | dispara follow-up e volta; retorna `busy` se o turno anterior ainda roda |
 | `deepseek_wait(session_id, wait_seconds?)` | **bloqueia até uma sessão terminar** (default 1h, máx. 6h) e devolve o resultado |
 | `deepseek_wait_all(session_ids[], wait_seconds?)` | espera **todas** em paralelo; tempo = o da mais lenta, não a soma |
-| `deepseek_status(session_id, wait_seconds?)` | **compacto**: estado, tempo, última tool, usage e preview de ~400 chars |
-| `deepseek_result(session_id, max_chars?)` | puxa o output completo do último turno **uma vez** (default 20k chars) |
-| `deepseek_cancel(session_id)` | cancela o turno |
-| `deepseek_close(session_id)` | encerra o processo e esquece a sessão (libera RAM) |
+| `deepseek_status(session_id, wait_seconds?)` | **compacto**: estado, tempo, última tool, usage e preview de ~400 chars (inclusive parcial) |
+| `deepseek_result(session_id, max_chars?)` | puxa o output acumulado **uma vez** (default 20k chars), inclusive parcial durante o turno ou após erro |
+| `deepseek_cancel(session_id, wait_seconds?)` | interrompe o turno em voo (mesmo com a espera estourada) e devolve o output parcial; default aguarda 30s |
+| `deepseek_close(session_id)` | encerra o processo e esquece a sessão; devolve o output parcial e libera RAM |
 | `deepseek_list()` | lista as sessões abertas |
 
 ## Custo no Claude
@@ -26,7 +26,8 @@ Ponte MCP entre Claude Code e o **DeepSeek Harness** oficial, usando o ACP
 - Fluxo normal: `deepseek_start` (rápido, devolve `session_id`) + `deepseek_wait` (bloqueia). A partir de 8s o Claude Code põe a espera em background e notifica o Claude no fim — sem polling nem vigia.
 - Vários agentes: `deepseek_start_many` + `deepseek_wait_all`. **Nunca intercale** `start`/`wait` — esperar o A antes de iniciar o B serializa tudo.
 - Chamada interrompida **não** cancela o turno do DeepSeek: recupere com `deepseek_list` + `deepseek_wait`.
-- Se `deepseek_wait` devolver `status: "running"` (espera estourada), chame de novo uma vez com `wait_seconds` grande.
+- Se `deepseek_wait` devolver `status: "running"` (espera estourada), o turno **continua vivo**: chame de novo uma vez com `wait_seconds` grande. Isso não é erro e não libera a sessão para um novo prompt.
+- `deepseek_cancel` interrompe o turno de verdade, espera o agente parar e devolve o relatório parcial; use-o antes de desistir de uma tarefa longa.
 
 ## Modos
 

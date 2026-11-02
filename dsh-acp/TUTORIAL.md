@@ -174,10 +174,10 @@ claude mcp add dsh-acp --scope local \
 | `deepseek_send(session_id, message, wait?, wait_seconds?)` | dispara follow-up e volta; retorna `busy` se o turno anterior ainda roda |
 | `deepseek_wait(session_id, wait_seconds?)` | **bloqueia até uma sessão terminar** (default 1h, máx. 6h) e devolve o resultado |
 | `deepseek_wait_all(session_ids[], wait_seconds?)` | espera **todas** em paralelo; tempo total = o da mais lenta, não a soma |
-| `deepseek_status(session_id, wait_seconds?)` | **compacto**: estado, tempo, última tool, usage + preview de 400 chars (default sem espera) |
-| `deepseek_result(session_id, max_chars?)` | output completo do último turno, uma vez |
-| `deepseek_cancel(session_id)` | cancela o turno |
-| `deepseek_close(session_id)` | encerra o processo e esquece a sessão (libera RAM na hora) |
+| `deepseek_status(session_id, wait_seconds?)` | **compacto**: estado, tempo, última tool, usage + preview de 400 chars (default sem espera, inclusive parcial) |
+| `deepseek_result(session_id, max_chars?)` | output acumulado, uma vez — inclusive parcial durante o turno ou após erro |
+| `deepseek_cancel(session_id, wait_seconds?)` | interrompe o turno em voo (mesmo com espera estourada), aguarda até 30s e devolve o output parcial |
+| `deepseek_close(session_id)` | encerra o processo e esquece a sessão; devolve o output parcial e libera RAM na hora |
 | `deepseek_list()` | lista as sessões abertas |
 
 **Modos:**
@@ -241,8 +241,19 @@ Se a chamada for interrompida (mensagem nova, Esc, `/tasks`), o turno do
 DeepSeek **não** é cancelado: a sessão continua. Recupere com `deepseek_list`
 e `deepseek_wait` — o `session_id` já foi entregue pelo `start`.
 
-Se a janela de espera estourar (`status: "running"`), chame `deepseek_wait`
-**uma vez** com `wait_seconds` grande (ex.: 3600), nunca de 30 em 30 segundos.
+Se a janela de espera estourar (`status: "running"`), o turno **continua vivo**:
+chame `deepseek_wait` **uma vez** com `wait_seconds` grande (ex.: 3600), nunca
+de 30 em 30 segundos. A espera estourada não é erro, não fecha a sessão e não
+libera a sessão para um novo prompt.
+
+### Cancelar sem perder o relatório
+
+`deepseek_cancel` manda o `session/cancel` do ACP para o turno que está
+realmente em voo — inclusive depois de uma espera estourada. Ele aguarda o
+agente parar (default 30s) e devolve o output acumulado até ali, marcado com
+`cancelled`/`stop_reason: "cancelled"`. Se ainda vier `cancel_requested: true`,
+não mande prompt novo: espere ou cancele de novo. Para ler o parcial a qualquer
+momento, use `deepseek_result`; ele funciona com o turno em andamento.
 
 ### Vários agentes em paralelo
 
