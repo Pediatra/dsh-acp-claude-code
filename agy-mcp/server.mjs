@@ -1175,7 +1175,8 @@ const TOOLS = [
     name: "agy_wait",
     description:
       "Block until ONE session's turn finishes (default 10 min, max 1h) and return the full result. For several " +
-      "sessions use agy_wait_all (concurrent). Claude Code auto-backgrounds long calls and notifies you on finish.",
+      "sessions use agy_wait_all (concurrent). Claude Code auto-backgrounds long calls and notifies you on finish. " +
+      "NON-BLOCKING ALTERNATIVE: run `agy-wait <conversation_id>` with Bash run_in_background.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1189,7 +1190,8 @@ const TOOLS = [
     name: "agy_wait_all",
     description:
       "Block until ALL given sessions finish (default 10 min, max 1h) and return each result. Waits run " +
-      "concurrently: N agents take max(time), not sum(time). If some are still running, call again with the remaining ids.",
+      "concurrently: N agents take max(time), not sum(time). If some are still running, call again with the remaining ids. " +
+      "NON-BLOCKING ALTERNATIVE: run `agy-wait <conversation_id> [...]` with Bash run_in_background.",
     inputSchema: {
       type: "object",
       properties: {

@@ -1348,7 +1348,8 @@ const TOOLS = [
       "Block until ALL given sessions finish (default 1h, max 6h) and return each result. The waits run " +
       "concurrently, so N agents take max(time), not sum(time). Use right after deepseek_start_many; Claude Code " +
       "auto-backgrounds this call and notifies you on completion. If it returns running sessions, call it again " +
-      "with the remaining ids — never loop with short waits.",
+      "with the remaining ids — never loop with short waits. NON-BLOCKING ALTERNATIVE: run " +
+      "`dsh-wait <dsh_session_id> [...]` with Bash run_in_background instead; it waits outside this MCP call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1382,7 +1383,8 @@ const TOOLS = [
       "For several sessions use deepseek_wait_all (it waits on all of them concurrently). Claude Code moves a call " +
       "still running after a few seconds to a background task and wakes you with the result when it settles, so " +
       "this is the notification mechanism. If it returns status=running (wait window expired), the turn is still " +
-      "alive: call deepseek_wait again once with a large wait_seconds; never send a new prompt or loop with short waits.",
+      "alive: call deepseek_wait again once with a large wait_seconds; never send a new prompt or loop with short waits. " +
+      "NON-BLOCKING ALTERNATIVE: run `dsh-wait <dsh_session_id>` with Bash run_in_background; it waits outside this MCP turn.",
     inputSchema: {
       type: "object",
       properties: {
