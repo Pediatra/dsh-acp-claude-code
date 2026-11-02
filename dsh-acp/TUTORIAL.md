@@ -171,6 +171,7 @@ claude mcp add dsh-acp --scope local \
 |---|---|
 | `deepseek_start(prompt, cwd?, mode?, reasoning_effort?, wait?, wait_seconds?)` | cria **uma** sessão e volta em ~3s com `session_id` (`status: running`) |
 | `deepseek_start_many(tasks[])` | cria **N sessões em paralelo** numa única chamada (máx. 8) e devolve os `session_ids` |
+| `deepseek_resume(dsh_session_id, prompt, cwd?, ...)` | reata a uma sessão persistida por UUID após restart/crash e manda um prompt |
 | `deepseek_send(session_id, message, wait?, wait_seconds?)` | dispara follow-up e volta; retorna `busy` se o turno anterior ainda roda |
 | `deepseek_wait(session_id, wait_seconds?)` | **bloqueia até uma sessão terminar** (default 1h, máx. 6h) e devolve o resultado |
 | `deepseek_wait_all(session_ids[], wait_seconds?)` | espera **todas** em paralelo; tempo total = o da mais lenta, não a soma |
@@ -277,7 +278,26 @@ Se preferir chamadas separadas, inicie **todos** primeiro e só então faça os
 Cada sessão é um processo DSH próprio (~100–250 MB). Use `deepseek_close`
 quando terminar; sem isso, o shim fecha sozinho após **30 min ocioso**
 (`DSH_ACP_IDLE_TTL_SECONDS`, default `1800`; `0` desliga). A sessão fechada é
-esquecida — para continuar depois, abra uma nova com contexto novo.
+esquecida pelo shim, mas o histórico fica no disco: use `deepseek_resume` com o
+`dsh_session_id` para continuar.
+
+### Retomar depois de crash/restart
+
+`session_id` (`s1`, `s2`, …) é só um alias em memória. Depois que o PC ou o
+Claude reinicia, `deepseek_list` volta vazio e `deepseek_send("s1")` não existe
+mais. O ID durável é o UUID `dsh_session_id` devolvido no `start`:
+
+```json
+deepseek_resume(
+  dsh_session_id="30cdef49-0aaa-4dfc-9e60-c532a6926bf7",
+  prompt="Continue de onde parou. Refiz o passo interrompido e siga com o relatório.",
+  cwd="/var/home/gabriel/Projects/chorinho-dataset"
+)
+```
+
+O `cwd` precisa ser o mesmo da sessão original. O histórico e os arquivos
+voltam; jobs e tool calls que estavam rodando **não** voltam. O agente retoma do
+último estado gravado e pode precisar refazer o passo interrompido.
 
 Implementação:
 

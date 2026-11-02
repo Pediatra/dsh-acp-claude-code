@@ -35,6 +35,7 @@ No Desktop, reinicie o app ou abra uma sessão nova; em sessão aberta:
 |---|---|
 | `agy_start(prompt, cwd?, mode?, model?, effort?, wait?, wait_seconds?)` | abre **uma** sessão e volta rápido com `session_id` |
 | `agy_start_many(tasks[])` | abre **N sessões em paralelo** numa chamada (máx. 8) |
+| `agy_resume(conversation_id, prompt, ...)` | reata a uma conversa persistida por UUID após restart/crash |
 | `agy_send(session_id, message, wait?, wait_seconds?)` | follow-up; respawna a sessão se ela foi fechada por TTL |
 | `agy_wait(session_id, wait_seconds?)` | bloqueia até o turno terminar (default 10 min, máx. 1h) |
 | `agy_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo (tempo = a mais lenta) |
@@ -52,6 +53,20 @@ No Desktop, reinicie o app ou abra uma sessão nova; em sessão aberta:
   sozinha após **30 min** (`AGY_IDLE_TTL_SECONDS`, default `1800`; `0` desliga).
   Um `agy_send` depois respawna com `--conversation` e mantém o contexto.
 - `agy_close` encerra e **esquece** a sessão; para continuar, abra outra.
+
+## Retomar após restart/crash
+
+`session_id` (`gN`) é só um alias em memória. O UUID `conversation_id` é
+durável e sobrevive ao restart do shim/PC:
+
+```json
+agy_resume(conversation_id="<uuid>", prompt="Continue de onde parou")
+```
+
+O agy é reiniciado com `--conversation`, restaurando o histórico. Comandos e
+tools que estavam rodando **não** voltam; o agente pode precisar refazer o passo
+interrompido. Se a conversa usava Gemini 4 Argon, passe `model` explicitamente
+no resume.
 
 ## Modos
 

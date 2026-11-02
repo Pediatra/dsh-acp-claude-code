@@ -93,12 +93,13 @@ function findDsh() {
 let nextSession = 1;
 
 class AcpSession {
-  constructor({ mode, cwd, effort = DEFAULT_EFFORT }) {
+  constructor({ mode, cwd, effort = DEFAULT_EFFORT, resumeSessionId = null }) {
     this.id = "s" + nextSession++;
     this.mode = mode;
     this.cwd = cwd;
     this.model = DEFAULT_MODEL;
     this.effort = effort;
+    this.resumeSessionId = resumeSessionId;
     this.status = "starting";
     this.sessionId = null;
     this.proc = null;
@@ -288,39 +289,61 @@ class AcpSession {
     this.idleTimer.unref?.();
   }
 
-  async init() {
+  async init({ configure = true } = {}) {
     await this.request("initialize", { protocolVersion: 1, clientCapabilities: {} }, 30_000);
-    const created = await this.request("session/new", { cwd: this.cwd, mcpServers: [] }, 30_000);
-    this.sessionId = created.sessionId;
-    const modelOption = (created.configOptions || []).find((o) => o.id === "model");
-    const value = modelValue(this.model);
-    const hasModel = modelOption?.options?.some((group) =>
-      (group.options || []).some((o) => o.value === value),
-    );
-    if (hasModel || !modelOption) {
-      const res = await this.request(
-        "session/set_config_option",
-        { sessionId: this.sessionId, configId: "model", value },
-        15_000,
-      ).catch((e) => { log("model set failed:", e.message); return null; });
-      const current = res?.configOptions?.find((o) => o.id === "model")?.currentValue;
-      if (typeof current === "string") {
-        try {
-          const parsed = JSON.parse(current);
-          if (Array.isArray(parsed) && typeof parsed[1] === "string") this.model = parsed[1];
-        } catch {}
+    let state;
+    if (this.resumeSessionId) {
+      state = await this.request(
+        "session/resume",
+        { sessionId: this.resumeSessionId, cwd: this.cwd, mcpServers: [] },
+        60_000,
+      );
+      this.sessionId = this.resumeSessionId;
+    } else {
+      state = await this.request("session/new", { cwd: this.cwd, mcpServers: [] }, 30_000);
+      this.sessionId = state.sessionId;
+    }
+    let options = state.configOptions || [];
+
+    // A fresh session gets the shim's fixed model/effort. A resume keeps the
+    // stored configuration; we only read it back so status stays accurate.
+    if (configure) {
+      const modelOption = options.find((o) => o.id === "model");
+      const value = modelValue(this.model);
+      const hasModel = modelOption?.options?.some((group) =>
+        (group.options || []).some((o) => o.value === value),
+      );
+      if (hasModel || !modelOption) {
+        const res = await this.request(
+          "session/set_config_option",
+          { sessionId: this.sessionId, configId: "model", value },
+          15_000,
+        ).catch((e) => { log("model set failed:", e.message); return null; });
+        if (res?.configOptions) options = res.configOptions;
       }
     }
-    const effortOption = (created.configOptions || []).find((o) => o.id === "reasoning_effort");
-    if ((effortOption?.options || []).some((o) => o.value === this.effort)) {
-      const res = await this.request(
-        "session/set_config_option",
-        { sessionId: this.sessionId, configId: "reasoning_effort", value: this.effort },
-        15_000,
-      ).catch((e) => { log("effort set failed:", e.message); return null; });
-      const current = res?.configOptions?.find((o) => o.id === "reasoning_effort")?.currentValue;
-      if (typeof current === "string") this.effort = current;
+    const currentModel = options.find((o) => o.id === "model")?.currentValue;
+    if (typeof currentModel === "string") {
+      try {
+        const parsed = JSON.parse(currentModel);
+        if (Array.isArray(parsed) && typeof parsed[1] === "string") this.model = parsed[1];
+      } catch {}
     }
+
+    if (configure) {
+      const effortOption = options.find((o) => o.id === "reasoning_effort");
+      if ((effortOption?.options || []).some((o) => o.value === this.effort)) {
+        const res = await this.request(
+          "session/set_config_option",
+          { sessionId: this.sessionId, configId: "reasoning_effort", value: this.effort },
+          15_000,
+        ).catch((e) => { log("effort set failed:", e.message); return null; });
+        if (res?.configOptions) options = res.configOptions;
+      }
+    }
+    const currentEffort = options.find((o) => o.id === "reasoning_effort")?.currentValue;
+    if (typeof currentEffort === "string") this.effort = currentEffort;
+
     this.status = "idle";
   }
 
@@ -516,14 +539,21 @@ function sendProgress(progressToken, session, label) {
   });
 }
 
-async function createSession(args) {
+async function createSession(args, { resumeSessionId = null } = {}) {
   const mode = args.mode === "read-only" ? "read-only" : "workspace-write";
   const cwd = resolveCwd(args.cwd);
   const effort = ALLOWED_EFFORTS.has(args.reasoning_effort) ? args.reasoning_effort : DEFAULT_EFFORT;
-  const session = new AcpSession({ mode, cwd, effort });
+  if (resumeSessionId) {
+    for (const s of sessions.values()) {
+      if (s.sessionId === resumeSessionId) {
+        throw new Error(`session ${resumeSessionId} is already open as ${s.id}; use that session or close it first`);
+      }
+    }
+  }
+  const session = new AcpSession({ mode, cwd, effort, resumeSessionId });
   sessions.set(session.id, session);
   try {
-    await session.init();
+    await session.init({ configure: !resumeSessionId });
     session.prompt(String(args.prompt));
     return session;
   } catch (err) {
@@ -537,6 +567,22 @@ async function toolStart(args, progressToken) {
   const session = await createSession(args);
   const wait = resolveWait(args);
   if (wait > 0) await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, "deepseek_start"));
+  if (!session.busy) return session.resultPayload();
+  return session.statusPayload();
+}
+
+/**
+ * Reattach to a persisted DSH session and send the first prompt of the new
+ * process. This is the crash/restart path: the local sN aliases are in-memory,
+ * but the DSH UUID and its history survive on disk.
+ */
+async function toolResume(args, progressToken) {
+  const dshSessionId = String(args.dsh_session_id || "").trim();
+  if (!dshSessionId) throw new Error("dsh_session_id is required");
+  if (!args.prompt || !String(args.prompt).trim()) throw new Error("prompt is required");
+  const session = await createSession(args, { resumeSessionId: dshSessionId });
+  const wait = resolveWait(args);
+  if (wait > 0) await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, "deepseek_resume"));
   if (!session.busy) return session.resultPayload();
   return session.statusPayload();
 }
@@ -714,7 +760,8 @@ const TOOLS = [
     name: "deepseek_start",
     description:
       "Start ONE DeepSeek Harness agent session through the official ACP server. Returns in a few seconds (~3s) with " +
-      "session_id and status=running. Call deepseek_wait(session_id) after it to get the result. " +
+      "session_id and status=running. Call deepseek_wait(session_id) after it to get the result. The returned " +
+      "dsh_session_id is durable: deepseek_resume can reattach after a restart/crash. " +
       "PARALLELISM: for several independent agents use deepseek_start_many (single call starts them all). If you " +
       "insist on separate calls, start EVERY agent first and only then call deepseek_wait — a wait on A before " +
       "starting B serializes the work (B does not exist until A finishes). Never poll and never create file " +
@@ -761,6 +808,27 @@ const TOOLS = [
         },
       },
       required: ["tasks"],
+    },
+  },
+  {
+    name: "deepseek_resume",
+    description:
+      "Resume a persisted DeepSeek session by its durable dsh_session_id (the UUID returned by deepseek_start, " +
+      "not the local sN alias) and send a prompt — use this after a Claude/DSH restart or crash, or after " +
+      "deepseek_close. The session keeps its history and files; cwd must match the original session. Running " +
+      "background jobs and in-flight tool calls are gone: the agent may need to redo the interrupted step. " +
+      "Follow with deepseek_wait.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dsh_session_id: { type: "string", description: "UUID of the persisted DSH session (dsh_session_id)" },
+        prompt: { type: "string", description: "Message to send on resume, e.g. 'Continue de onde parou'" },
+        cwd: { type: "string", description: "Must match the session's original cwd (default: project root)" },
+        mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
+        wait: { type: "boolean", description: "false (default) = return immediately; true = block here." },
+        wait_seconds: { type: "number", description: "0-21600; explicit blocking wait." },
+      },
+      required: ["dsh_session_id", "prompt"],
     },
   },
   {
@@ -885,6 +953,7 @@ async function callTool(name, args, progressToken) {
   switch (name) {
     case "deepseek_start": return textResult(await toolStart(args, progressToken));
     case "deepseek_start_many": return textResult(await toolStartMany(args));
+    case "deepseek_resume": return textResult(await toolResume(args, progressToken));
     case "deepseek_send": return textResult(await toolSend(args, progressToken));
     case "deepseek_wait": return textResult(await toolWait(args, progressToken));
     case "deepseek_wait_all": return textResult(await toolWaitAll(args, progressToken));

@@ -115,7 +115,7 @@ function buildSpawn({ mode, model, effort, cwd, conversationId }) {
 let nextSession = 1;
 
 class AgySession {
-  constructor({ mode, modeRequested, cwd, model, effort }) {
+  constructor({ mode, modeRequested, cwd, model, effort, conversationId = null }) {
     this.id = "g" + nextSession++;
     this.mode = mode;
     this.modeRequested = modeRequested || mode;
@@ -123,7 +123,7 @@ class AgySession {
     this.model = model;
     this.effort = effort;
     this.status = "starting";
-    this.conversationId = null;
+    this.conversationId = conversationId;
     this.permissionMode = null;
     this.proc = null;
     this.buf = "";
@@ -423,7 +423,7 @@ function sendProgress(progressToken, session, label) {
   });
 }
 
-async function createSession(args) {
+async function createSession(args, { conversationId = null } = {}) {
   const modeRequested = normalizeMode(args.mode);
   let mode = modeRequested;
   if (mode === "workspace-write" && !ALLOW_WRITE) {
@@ -433,7 +433,7 @@ async function createSession(args) {
   const cwd = resolveCwd(args.cwd);
   const model = normalizeModel(args.model);
   const effort = normalizeEffort(args.effort);
-  const session = new AgySession({ mode, modeRequested, cwd, model, effort });
+  const session = new AgySession({ mode, modeRequested, cwd, model, effort, conversationId });
   sessions.set(session.id, session);
   try {
     session.spawnProcess();
@@ -452,6 +452,22 @@ async function toolStart(args, progressToken) {
   const session = await createSession(args);
   const wait = clampWait(args.wait_seconds, args.wait ? DEFAULT_WAIT_SECONDS : 0, MAX_WAIT_SECONDS);
   if (wait > 0) await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, "agy_start"));
+  if (session.status === "idle") return session.resultPayload();
+  return session.statusPayload();
+}
+
+/**
+ * Reattach to a persisted agy conversation with --conversation and send the
+ * first prompt of the new process. The gN aliases are in-memory; the UUID
+ * survives in agy's conversation store.
+ */
+async function toolResume(args, progressToken) {
+  const conversationId = String(args.conversation_id || "").trim();
+  if (!conversationId) throw new Error("conversation_id is required");
+  if (!args.prompt || !String(args.prompt).trim()) throw new Error("prompt is required");
+  const session = await createSession(args, { conversationId });
+  const wait = clampWait(args.wait_seconds, args.wait ? DEFAULT_WAIT_SECONDS : 0, MAX_WAIT_SECONDS);
+  if (wait > 0) await session.waitForTurn(wait, (s) => sendProgress(progressToken, s, "agy_resume"));
   if (session.status === "idle") return session.resultPayload();
   return session.statusPayload();
 }
@@ -581,8 +597,9 @@ const TOOLS = [
   {
     name: "agy_start",
     description:
-      "Start ONE Antigravity (agy / Gemini 3.8 Flash) session and run a prompt. Returns quickly with session_id and " +
-      "status=running. Call agy_wait(session_id) to get the result. For several independent agents use " +
+      "Start ONE Antigravity (agy / Gemini) session and run a prompt. Returns quickly with session_id and " +
+      "status=running. Call agy_wait(session_id) to get the result. The returned conversation_id is durable: " +
+      "agy_resume can reattach after a restart/crash. For several independent agents use " +
       "agy_start_many in a single call — or start every agent first and only then wait; a wait before the next " +
       "start serializes the work. Workspace-write by default; use mode='read-only' for analysis (bwrap read-only).",
     inputSchema: {
@@ -626,6 +643,28 @@ const TOOLS = [
         },
       },
       required: ["tasks"],
+    },
+  },
+  {
+    name: "agy_resume",
+    description:
+      "Resume a persisted agy conversation by its durable conversation_id (the UUID returned in conversation_id, " +
+      "not the local gN alias) and send a prompt — use this after a Claude/agy restart or crash. This runs agy with " +
+      "--conversation and keeps the conversation history. Background commands and in-flight tools are gone: the " +
+      "agent may need to redo the interrupted step. Follow with agy_wait.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        conversation_id: { type: "string", description: "UUID of the agy conversation" },
+        prompt: { type: "string", description: "Message to send on resume, e.g. 'Continue de onde parou'" },
+        cwd: { type: "string", description: "Working directory inside the project (default: project root)" },
+        mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
+        model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL}` },
+        effort: { type: "string", enum: EFFORTS, description: `default ${DEFAULT_EFFORT}` },
+        wait: { type: "boolean", description: "false (default) = return immediately; true = block here." },
+        wait_seconds: { type: "number", description: "0-3600; explicit blocking wait." },
+      },
+      required: ["conversation_id", "prompt"],
     },
   },
   {
@@ -733,6 +772,7 @@ async function callTool(name, args, progressToken) {
   switch (name) {
     case "agy_start": return textResult(await toolStart(args, progressToken));
     case "agy_start_many": return textResult(await toolStartMany(args));
+    case "agy_resume": return textResult(await toolResume(args, progressToken));
     case "agy_send": return textResult(await toolSend(args, progressToken));
     case "agy_wait": return textResult(await toolWait(args, progressToken));
     case "agy_wait_all": return textResult(await toolWaitAll(args, progressToken));

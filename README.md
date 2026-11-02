@@ -124,6 +124,7 @@ segurar a conversa por mais tempo.
 |---|---|
 | `deepseek_start(prompt, cwd?, mode?, reasoning_effort?, wait?, wait_seconds?)` | cria uma sessão e volta em ~3s com `session_id` |
 | `deepseek_start_many(tasks[])` | inicia N sessões em paralelo (máx. 8) |
+| `deepseek_resume(dsh_session_id, prompt, ...)` | reata a uma sessão persistida após crash/restart e manda um prompt |
 | `deepseek_send(session_id, message, ...)` | follow-up na mesma sessão |
 | `deepseek_wait(session_id, wait_seconds?)` | bloqueia até uma sessão terminar (default 1h) |
 | `deepseek_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo |
@@ -137,6 +138,7 @@ segurar a conversa por mais tempo.
 |---|---|
 | `agy_start(prompt, cwd?, mode?, model?, effort?, wait?, wait_seconds?)` | cria uma sessão e volta rápido |
 | `agy_start_many(tasks[])` | inicia N sessões em paralelo (máx. 8) |
+| `agy_resume(conversation_id, prompt, ...)` | reata a uma conversa persistida após crash/restart e manda um prompt |
 | `agy_send(session_id, message, ...)` | follow-up; respawna se a sessão foi fechada por TTL |
 | `agy_wait(session_id, wait_seconds?)` | bloqueia até uma sessão terminar (default 10 min) |
 | `agy_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo |
@@ -163,6 +165,19 @@ Vários em paralelo:
 Regra de ouro: **não intercale `start` e `wait`**. `start A → wait A → start B`
 faz o B só existir depois que o A termina. Inicie todos primeiro (ou use o
 batch) e só então espere.
+
+## Retomar após crash/restart
+
+Os aliases `s1`/`g1` são **só da memória do shim**: depois de reiniciar o Claude
+ou o PC, `deepseek_list` volta vazio e `deepseek_send("s1")`/`agy_send("g1")` não
+existem mais. O ID durável continua no disco:
+
+- **DSH:** o UUID retornado como `dsh_session_id` → `deepseek_resume(dsh_session_id, prompt, ...)`
+- **agy:** o UUID retornado como `conversation_id` → `agy_resume(conversation_id, prompt, ...)`
+
+O histórico e os arquivos da sessão voltam. Processos e jobs em background que
+estavam rodando **não** voltam — o agente retoma do último estado gravado e pode
+precisar refazer o passo interrompido.
 
 ## Modos e segurança
 

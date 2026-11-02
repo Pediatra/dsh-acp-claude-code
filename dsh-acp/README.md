@@ -9,6 +9,7 @@ Ponte MCP entre Claude Code e o **DeepSeek Harness** oficial, usando o ACP
 |---|---|
 | `deepseek_start(prompt, cwd?, mode?, reasoning_effort?, wait?, wait_seconds?)` | cria **uma** sessão e volta em ~3s com `session_id` (`status: running`) |
 | `deepseek_start_many(tasks[])` | cria **N sessões em paralelo** numa chamada (máx. 8) e devolve os `session_ids` |
+| `deepseek_resume(dsh_session_id, prompt, cwd?, ...)` | reata a uma sessão persistida por UUID após restart/crash e manda um prompt |
 | `deepseek_send(session_id, message, wait?, wait_seconds?)` | dispara follow-up e volta; retorna `busy` se o turno anterior ainda roda |
 | `deepseek_wait(session_id, wait_seconds?)` | **bloqueia até uma sessão terminar** (default 1h, máx. 6h) e devolve o resultado |
 | `deepseek_wait_all(session_ids[], wait_seconds?)` | espera **todas** em paralelo; tempo = o da mais lenta, não a soma |
@@ -28,6 +29,19 @@ Ponte MCP entre Claude Code e o **DeepSeek Harness** oficial, usando o ACP
 - Chamada interrompida **não** cancela o turno do DeepSeek: recupere com `deepseek_list` + `deepseek_wait`.
 - Se `deepseek_wait` devolver `status: "running"` (espera estourada), o turno **continua vivo**: chame de novo uma vez com `wait_seconds` grande. Isso não é erro e não libera a sessão para um novo prompt.
 - `deepseek_cancel` interrompe o turno de verdade, espera o agente parar e devolve o relatório parcial; use-o antes de desistir de uma tarefa longa.
+
+## Retomar após restart/crash
+
+`session_id` (`sN`) é um alias em memória. O UUID `dsh_session_id` é durável e
+sobrevive ao restart do shim/PC:
+
+```json
+deepseek_resume(dsh_session_id="<uuid>", prompt="Continue de onde parou", cwd="<cwd original>")
+```
+
+O `cwd` precisa ser o mesmo da sessão original. O histórico e os arquivos
+voltam; jobs e tool calls que estavam em voo não voltam — o agente pode precisar
+refazer o passo interrompido. Depois de retomar, use `deepseek_wait` normalmente.
 
 ## Modos
 
