@@ -595,7 +595,7 @@ async function toolResume(args, progressToken) {
 async function toolStartMany(args) {
   const tasks = Array.isArray(args.tasks) ? args.tasks : [];
   if (tasks.length === 0) throw new Error("tasks must be a non-empty array");
-  if (tasks.length > 8) throw new Error("at most 8 tasks per call (each one is a DSH process)");
+  if (tasks.length > 12) throw new Error("at most 12 tasks per call (each one is a DSH process)");
   for (const [i, task] of tasks.entries()) {
     if (!task || typeof task.prompt !== "string" || !task.prompt.trim()) {
       throw new Error(`tasks[${i}].prompt is required`);
@@ -786,14 +786,14 @@ const TOOLS = [
     description:
       "Start N DeepSeek agent sessions CONCURRENTLY in one call and return their session_ids in a few seconds. " +
       "Use this whenever a task splits into parallel agents: it is the only way to guarantee they run at the same " +
-      "time. Follow with ONE deepseek_wait_all(session_ids). Each task is a full DSH process; max 8 per call.",
+      "time. Follow with ONE deepseek_wait_all(session_ids). Each task is a full DSH process; max 12 per call.",
     inputSchema: {
       type: "object",
       properties: {
         tasks: {
           type: "array",
           minItems: 1,
-          maxItems: 8,
+          maxItems: 12,
           description: "One object per agent. Each becomes its own DSH session/process.",
           items: {
             type: "object",

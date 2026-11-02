@@ -8,7 +8,7 @@ Ponte MCP entre Claude Code e o **DeepSeek Harness** oficial, usando o ACP
 | Tool | O que faz |
 |---|---|
 | `deepseek_start(prompt, cwd?, mode?, reasoning_effort?, wait?, wait_seconds?)` | cria **uma** sessão e volta em ~3s com `session_id` (`status: running`) |
-| `deepseek_start_many(tasks[])` | cria **N sessões em paralelo** numa chamada (máx. 8) e devolve os `session_ids` |
+| `deepseek_start_many(tasks[])` | cria **N sessões em paralelo** numa chamada (máx. 12) e devolve os `session_ids` |
 | `deepseek_resume(dsh_session_id, prompt, cwd?, ...)` | reata a uma sessão persistida por UUID após restart/crash e manda um prompt |
 | `deepseek_send(session_id, message, wait?, wait_seconds?)` | dispara follow-up e volta; retorna `busy` se o turno anterior ainda roda |
 | `deepseek_wait(session_id, wait_seconds?)` | **bloqueia até uma sessão terminar** (default 1h, máx. 6h) e devolve o resultado |
