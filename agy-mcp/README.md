@@ -38,7 +38,7 @@ No Desktop, reinicie o app ou abra uma sessão nova; em sessão aberta:
 | `agy_resume(conversation_id, prompt, ...)` | reata a uma conversa persistida por UUID após restart/crash |
 | `agy_send(session_id, message, wait?, wait_seconds?)` | follow-up; respawna a sessão se ela foi fechada por TTL |
 | `agy_wait(session_id, wait_seconds?)` | bloqueia até o turno terminar (default 10 min, máx. 1h) |
-| `agy_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo (tempo = a mais lenta) |
+| `agy_wait_all(session_ids[], wait_seconds?, full?)` | espera todas em paralelo; compacto por padrão (`full=true` traz o texto) |
 | `agy_status(session_id, wait_seconds?)` | compacto: estado, tempo, última tool, usage, denied; preview de 400 chars |
 | `agy_result(session_id, max_chars?)` | output completo do último turno, uma vez |
 | `agy_verify(session_id, command, retries?, ...)` | roda o teste, devolve o exit code e reenvia o erro ao agente |
@@ -67,15 +67,18 @@ agy-wait <conversation_id> [<outro-id> ...] --timeout 21600
 O shim grava `~/.local/state/agy-mcp/sessions/<uuid>.json` e `.out.txt`; o
 `agy-wait` usa `fs.watch` e imprime o resultado no fim.
 
-`profile` aceita `instructions`, `writable_dirs` e `forbidden_paths`. No agy,
-pastas graváveis viram `--bind` e caminhos proibidos viram `--tmpfs` (ficam
-ocultos). O log de tools fica em `<uuid>.tools.jsonl` com comando, saída e exit
-code; o resultado devolve só contagem e arquivos mudados.
+`profile` aceita `instructions`, `writable_dirs`, `forbidden_paths` e `silent`.
+No agy, pastas graváveis viram `--bind` e caminhos proibidos viram `--tmpfs`
+(ficam ocultos). `silent: true` não revela as listas no prompt, mas o `bwrap`
+continua aplicando. O log de tools fica em `<uuid>.tools.jsonl` com comando,
+saída e exit code; o resultado devolve só contagem e arquivos mudados.
 
 `verify_command` roda no `cwd` no fim do turno; se falhar, o erro volta ao
 agente e ele tenta de novo até `verify_retries`. `agy_verify` faz o mesmo sob
 demanda. Se o resultado vier `SUCCESS` com texto vazio e ação negada, o shim
 marca erro e reenvia uma vez pedindo a resposta sem comandos.
+
+> Em tarefa delegada, use só os testes do próprio trabalho e mantenha `verify_retries=0`. O gate completo do repositório continua com o coordenador antes do commit.
 
 ## Retomar após restart/crash
 
@@ -100,9 +103,10 @@ no resume.
   `--dangerously-skip-permissions` para rodar comandos; o resto do FS continua
   read-only. Ainda assim, aponte `AGY_WORKSPACE` só para o projeto.
 
-Modelos: `gemini-4-argon-low|medium|high` e
-`gemini-3.8-flash-low|medium|high` (default `gemini-3.8-flash-high`).
-Liste os disponíveis na sua conta com `agy models`.
+Modelos: `gemini-4-argon-medium|high` e
+`gemini-3.8-flash-medium|high` (default `gemini-3.8-flash-high`).
+As variantes `-low` foram removidas: para contagem de imagens o modelo barato
+divergiu; use `high` como default. Liste os disponíveis com `agy models`.
 Esforço: `low|medium|high|xhigh|max` (default `high`).
 
 **Trava de escrita para orquestradores:** `AGY_ALLOW_WRITE=0` rebaixa todo
@@ -141,3 +145,4 @@ Longo:
 - O trabalho do Gemini não entra no contexto do Claude; `status` é compacto e
   `result` puxa o texto uma vez.
 - Se `agy` atualizar, o protocolo stream-json pode mudar; teste após updates.
+

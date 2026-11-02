@@ -294,14 +294,17 @@ dsh-wait <uuid> [<uuid> ...] --timeout 21600
 
 O `dsh-wait` lê `~/.local/state/dsh-acp-mcp/sessions/<uuid>.json`, usa
 `fs.watch` (sem polling) e imprime o resultado no fim. O `profile` da sessão
-aceita `instructions`, `writable_dirs` e `forbidden_paths`; no DSH os caminhos
-viram um wrapper de `host-spawn` que bloqueia a saída por podman; uma tool que
-tente usar um caminho proibido cancela o turno e fica registrada no log. O log de cada
-tool (comando, saída e exit code) fica em `<uuid>.tools.jsonl`.
+aceita `instructions`, `writable_dirs`, `forbidden_paths` e `silent`; no DSH os
+caminhos viram um wrapper de `host-spawn` que bloqueia a saída por podman; uma
+tool que tente usar um caminho proibido cancela o turno e fica registrada no
+log. `silent: true` não revela as listas no prompt, mas o bloqueio continua. O
+log de cada tool (comando, saída e exit code) fica em `<uuid>.tools.jsonl`.
 
 `verify_command` roda no `cwd` no fim do turno. Se falhar, o erro volta ao
 agente e ele tenta de novo até `verify_retries`; `deepseek_verify` faz o mesmo
 sob demanda e devolve todos os códigos de saída.
+
+> Em tarefa delegada, use só os testes do próprio trabalho e mantenha `verify_retries=0`. O gate completo do repositório continua com o coordenador antes do commit.
 
 ### Retomar depois de crash/restart
 
@@ -365,3 +368,4 @@ projeto que você quer expor.
 - DSH está em **developer preview**: breaking changes são esperados. O shim é
   acoplado à linha 0.2.x.
 - Nada de chave/token no repo. O `.env` fica no diretório do shim, modo 600.
+

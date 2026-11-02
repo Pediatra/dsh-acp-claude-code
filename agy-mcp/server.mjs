@@ -24,10 +24,8 @@ const BWRAP = process.env.AGY_BWRAP || "/usr/bin/bwrap";
 const DEFAULT_MODEL = process.env.AGY_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_EFFORT = process.env.AGY_EFFORT || "high";
 const MODELS = [
-  "gemini-4-argon-low",
   "gemini-4-argon-medium",
   "gemini-4-argon-high",
-  "gemini-3.8-flash-low",
   "gemini-3.8-flash-medium",
   "gemini-3.8-flash-high",
 ];
@@ -139,6 +137,7 @@ function normalizeProfile(raw, cwd) {
     instructions: typeof raw.instructions === "string" ? raw.instructions.trim() : "",
     writable_dirs: [...new Set(writable)],
     forbidden_paths: [...new Set(forbidden)],
+    silent: raw.silent === true,
   };
 }
 
@@ -148,8 +147,11 @@ function applyProfilePrompt(prompt, profile) {
   }
   const lines = ["[PERFIL DA SESSÃO]"];
   if (profile.instructions) lines.push(profile.instructions);
-  if (profile.writable_dirs.length > 0) lines.push(`Pastas graváveis: ${profile.writable_dirs.join(", ")}`);
-  if (profile.forbidden_paths.length > 0) lines.push(`Caminhos proibidos: ${profile.forbidden_paths.join(", ")}`);
+  if (!profile.silent) {
+    if (profile.writable_dirs.length > 0) lines.push(`Pastas graváveis: ${profile.writable_dirs.join(", ")}`);
+    if (profile.forbidden_paths.length > 0) lines.push(`Caminhos proibidos: ${profile.forbidden_paths.join(", ")}`);
+  }
+  if (lines.length === 1) return prompt;
   lines.push("[FIM DO PERFIL]", "", prompt);
   return lines.join("\n");
 }
@@ -160,6 +162,7 @@ function profileSummary(profile) {
     instructions_chars: profile.instructions.length,
     writable_dirs: profile.writable_dirs,
     forbidden_paths: profile.forbidden_paths,
+    silent: profile.silent === true,
   };
 }
 
@@ -245,12 +248,14 @@ const SESSION_PREFIX = (process.env.AGY_SESSION_PREFIX || Math.random().toString
   .slice(0, 6) || "x";
 
 class AgySession {
-  constructor({ mode, modeRequested, cwd, model, effort, effortSource = "default", conversationId = null, profile = null }) {
+  constructor({ mode, modeRequested, cwd, model, modelRequested = null, modelNote = null, effort, effortSource = "default", conversationId = null, profile = null }) {
     this.id = `g${SESSION_PREFIX}-${nextSession++}`;
     this.mode = mode;
     this.modeRequested = modeRequested || mode;
     this.cwd = cwd;
     this.model = model;
+    this.modelRequested = modelRequested || model;
+    this.modelNote = modelNote;
     this.effort = effort;
     this.effortSource = effortSource;
     this.profile = profile;
@@ -596,6 +601,8 @@ class AgySession {
       mode: this.mode,
       cwd: this.cwd,
       model: this.model,
+      model_requested: this.modelRequested,
+      model_note: this.modelNote,
       effort: this.effort,
       effort_source: this.effortSource,
       profile: profileSummary(this.profile),
@@ -738,11 +745,14 @@ async function createSession(args, { conversationId = null } = {}) {
   }
   const cwd = resolveCwd(args.cwd);
   const model = normalizeModel(args.model);
+  const modelNote = args.model && args.model !== model
+    ? `model ${args.model} is not allowed; using ${model}`
+    : null;
   const modelLevel = effortFromModel(model);
   const effort = modelLevel || normalizeEffort(args.effort);
   const effortSource = modelLevel ? "model" : (args.effort !== undefined ? "argument" : "default");
   const profile = normalizeProfile(args.profile, cwd);
-  const session = new AgySession({ mode, modeRequested, cwd, model, effort, effortSource, conversationId, profile });
+  const session = new AgySession({ mode, modeRequested, cwd, model, modelRequested: args.model || model, modelNote, effort, effortSource, conversationId, profile });
   sessions.set(session.id, session);
   try {
     session.spawnProcess();
@@ -994,10 +1004,21 @@ async function toolWait(args, progressToken) {
   return s.statusPayload();
 }
 
+function waitSummary(session) {
+  const p = session.statusPayload();
+  const tools = session.toolSummary();
+  p.tool_calls_count = tools.count;
+  p.tool_calls_by_status = tools.by_status;
+  p.tool_log = tools.log;
+  p.result_command = `agy_result(session_id="${session.id}")`;
+  return p;
+}
+
 async function toolWaitAll(args, progressToken) {
   const ids = Array.isArray(args.session_ids) ? args.session_ids.map(String) : [];
   if (ids.length === 0) throw new Error("session_ids must be a non-empty array");
   const wait = clampWait(args.wait_seconds, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
+  const full = args.full === true;
   const out = await Promise.all(ids.map(async (id) => {
     let s;
     try {
@@ -1006,7 +1027,8 @@ async function toolWaitAll(args, progressToken) {
       return { session_id: id, status: "unknown", error: err.message || String(err) };
     }
     if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "agy_wait_all"));
-    return s.status !== "running" ? s.resultPayload() : s.statusPayload();
+    if (s.status === "running") return s.statusPayload();
+    return full ? s.resultPayload() : waitSummary(s);
   }));
   const done = out.filter((x) => x.status === "idle").length;
   const failed = out.filter((x) => ["error", "cancelled", "closed", "unknown"].includes(x.status)).length;
@@ -1015,6 +1037,8 @@ async function toolWaitAll(args, progressToken) {
   if (running > 0) {
     res.hint = "some sessions are still running; call agy_wait_all again with the remaining ids";
     res.remaining = out.filter((x) => x.status === "running").map((x) => x.session_id);
+  } else if (!full) {
+    res.hint = "compact results: use agy_result(session_id) or agy_wait_all(full=true) for full output";
   }
   return res;
 }
@@ -1071,6 +1095,7 @@ const PROFILE_SCHEMA = {
     instructions: { type: "string", description: "Default text prepended to this prompt." },
     writable_dirs: { type: "array", items: { type: "string" }, description: "Extra directories this session may write." },
     forbidden_paths: { type: "array", items: { type: "string" }, description: "Paths this session must not use (hidden/denied)." },
+    silent: { type: "boolean", description: "Do not disclose the path lists in the prompt; enforcement still applies." },
   },
 };
 
@@ -1092,8 +1117,8 @@ const TOOLS = [
         model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL}` },
         effort: { type: "string", enum: EFFORTS, description: `default ${DEFAULT_EFFORT}` },
         profile: PROFILE_SCHEMA,
-        verify_command: { type: "string", description: "Optional test command; if it exits non-zero, the agent gets the error and can retry." },
-        verify_retries: { type: "number", description: "0-5; default 0" },
+        verify_command: { type: "string", description: "Optional test of THIS delegated work, not the repo-wide gate. If it fails, the agent gets the error; keep verify_retries=0 for delegated tasks." },
+        verify_retries: { type: "number", description: "0-5; default 0 (keep 0 for delegated tasks)" },
         verify_timeout_seconds: { type: "number", description: "default 600" },
         wait: { type: "boolean", description: "false (default) = return immediately; true = block here (up to 10 min)." },
         wait_seconds: { type: "number", description: "0-3600; explicit blocking wait." },
@@ -1148,8 +1173,8 @@ const TOOLS = [
         model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL}` },
         effort: { type: "string", enum: EFFORTS, description: `default ${DEFAULT_EFFORT}` },
         profile: PROFILE_SCHEMA,
-        verify_command: { type: "string", description: "Optional test command; if it exits non-zero, the agent gets the error and can retry." },
-        verify_retries: { type: "number", description: "0-5; default 0" },
+        verify_command: { type: "string", description: "Optional test of THIS delegated work, not the repo-wide gate. If it fails, the agent gets the error; keep verify_retries=0 for delegated tasks." },
+        verify_retries: { type: "number", description: "0-5; default 0 (keep 0 for delegated tasks)" },
         verify_timeout_seconds: { type: "number", description: "default 600" },
         wait: { type: "boolean", description: "false (default) = return immediately; true = block here." },
         wait_seconds: { type: "number", description: "0-3600; explicit blocking wait." },
@@ -1191,12 +1216,14 @@ const TOOLS = [
     description:
       "Block until ALL given sessions finish (default 10 min, max 1h) and return each result. Waits run " +
       "concurrently: N agents take max(time), not sum(time). If some are still running, call again with the remaining ids. " +
+      "By default returns compact previews (use agy_result for full text); pass full=true to get the full output. " +
       "NON-BLOCKING ALTERNATIVE: run `agy-wait <conversation_id> [...]` with Bash run_in_background.",
     inputSchema: {
       type: "object",
       properties: {
         session_ids: { type: "array", minItems: 1, maxItems: 16, items: { type: "string" } },
         wait_seconds: { type: "number", description: "0-3600; default 600" },
+        full: { type: "boolean", description: "false (default) = compact previews; true = full output per session" },
       },
       required: ["session_ids"],
     },
@@ -1231,13 +1258,13 @@ const TOOLS = [
     name: "agy_verify",
     description:
       "Run a test command in the session's cwd and return its exit code. If it fails, send the error back to the agent " +
-      "and retry up to retries times. Use after agy_wait, or set verify_command on start/resume.",
+      "and retry up to retries times. Use only this work's tests; the repo-wide gate stays with the coordinator. Use after agy_wait, or set verify_command on start/resume.",
     inputSchema: {
       type: "object",
       properties: {
         session_id: { type: "string" },
         command: { type: "string" },
-        retries: { type: "number", description: "0-5; default 0" },
+        retries: { type: "number", description: "0-5; default 0 (keep 0 for delegated tasks)" },
         timeout_seconds: { type: "number", description: "default 600" },
         wait_seconds: { type: "number", description: "how long to wait for the current turn; default 600" },
       },

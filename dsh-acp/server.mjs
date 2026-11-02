@@ -175,6 +175,7 @@ function normalizeProfile(raw, cwd) {
     instructions: typeof raw.instructions === "string" ? raw.instructions.trim() : "",
     writable_dirs: [...new Set(writable)],
     forbidden_paths: [...new Set(forbidden)],
+    silent: raw.silent === true,
   };
 }
 
@@ -184,8 +185,11 @@ function applyProfilePrompt(prompt, profile) {
   }
   const lines = ["[PERFIL DA SESSÃO]"];
   if (profile.instructions) lines.push(profile.instructions);
-  if (profile.writable_dirs.length > 0) lines.push(`Pastas graváveis: ${profile.writable_dirs.join(", ")}`);
-  if (profile.forbidden_paths.length > 0) lines.push(`Caminhos proibidos: ${profile.forbidden_paths.join(", ")}`);
+  if (!profile.silent) {
+    if (profile.writable_dirs.length > 0) lines.push(`Pastas graváveis: ${profile.writable_dirs.join(", ")}`);
+    if (profile.forbidden_paths.length > 0) lines.push(`Caminhos proibidos: ${profile.forbidden_paths.join(", ")}`);
+  }
+  if (lines.length === 1) return prompt;
   lines.push("[FIM DO PERFIL]", "", prompt);
   return lines.join("\n");
 }
@@ -196,6 +200,7 @@ function profileSummary(profile) {
     instructions_chars: profile.instructions.length,
     writable_dirs: profile.writable_dirs,
     forbidden_paths: profile.forbidden_paths,
+    silent: profile.silent === true,
   };
 }
 
@@ -1038,10 +1043,21 @@ async function toolStartMany(args) {
 }
 
 /** Waits on every session concurrently, so N agents finish in max(time), not sum(time). */
+function waitSummary(session) {
+  const p = session.statusPayload();
+  const tools = session.toolSummary();
+  p.tool_calls_count = tools.count;
+  p.tool_calls_by_status = tools.by_status;
+  p.tool_log = tools.log;
+  p.result_command = `deepseek_result(session_id="${session.id}")`;
+  return p;
+}
+
 async function toolWaitAll(args, progressToken) {
   const ids = Array.isArray(args.session_ids) ? args.session_ids.map(String) : [];
   if (ids.length === 0) throw new Error("session_ids must be a non-empty array");
   const wait = clampWait(args.wait_seconds, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
+  const full = args.full === true;
   const out = await Promise.all(ids.map(async (id) => {
     let s;
     try {
@@ -1050,7 +1066,8 @@ async function toolWaitAll(args, progressToken) {
       return { session_id: id, status: "unknown", error: err.message || String(err) };
     }
     if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "deepseek_wait_all"));
-    return s.busy ? s.statusPayload() : s.resultPayload();
+    if (s.busy) return s.statusPayload();
+    return full ? s.resultPayload() : waitSummary(s);
   }));
   const done = out.filter((x) => x.status === "idle").length;
   const running = out.filter((x) => x.status === "running").length;
@@ -1066,6 +1083,8 @@ async function toolWaitAll(args, progressToken) {
     const still = out.filter((x) => x.status === "running").map((x) => x.session_id);
     res.hint = "some sessions are still running; call deepseek_wait_all again with the remaining ids";
     res.remaining = still;
+  } else if (!full) {
+    res.hint = "compact results: use deepseek_result(session_id) or deepseek_wait_all(full=true) for full output";
   }
   return res;
 }
@@ -1292,6 +1311,7 @@ const PROFILE_SCHEMA = {
     instructions: { type: "string", description: "Default text prepended to this prompt." },
     writable_dirs: { type: "array", items: { type: "string" }, description: "Extra directories this session may write." },
     forbidden_paths: { type: "array", items: { type: "string" }, description: "Paths this session must not use (hidden/denied)." },
+    silent: { type: "boolean", description: "Do not disclose the path lists in the prompt; enforcement still applies." },
   },
 };
 
@@ -1316,8 +1336,8 @@ const TOOLS = [
         mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
         reasoning_effort: { type: "string", enum: ["off", "low", "high", "max"], description: "default max" },
         profile: PROFILE_SCHEMA,
-        verify_command: { type: "string", description: "Optional test command; if it exits non-zero, the agent gets the error and can retry." },
-        verify_retries: { type: "number", description: "0-5; default 0" },
+        verify_command: { type: "string", description: "Optional test of THIS delegated work, not the repo-wide gate. If it fails, the agent gets the error; keep verify_retries=0 for delegated tasks." },
+        verify_retries: { type: "number", description: "0-5; default 0 (keep 0 for delegated tasks)" },
         verify_timeout_seconds: { type: "number", description: "default 600" },
         wait: { type: "boolean", description: "false (default) = return immediately with session_id; true = block here instead of using deepseek_wait." },
         wait_seconds: { type: "number", description: "0-21600; explicit blocking wait (overrides wait)." },
@@ -1371,8 +1391,8 @@ const TOOLS = [
         cwd: { type: "string", description: "Must match the session's original cwd (default: project root)" },
         mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
         profile: PROFILE_SCHEMA,
-        verify_command: { type: "string", description: "Optional test command; if it exits non-zero, the agent gets the error and can retry." },
-        verify_retries: { type: "number", description: "0-5; default 0" },
+        verify_command: { type: "string", description: "Optional test of THIS delegated work, not the repo-wide gate. If it fails, the agent gets the error; keep verify_retries=0 for delegated tasks." },
+        verify_retries: { type: "number", description: "0-5; default 0 (keep 0 for delegated tasks)" },
         verify_timeout_seconds: { type: "number", description: "default 600" },
         wait: { type: "boolean", description: "false (default) = return immediately; true = block here." },
         wait_seconds: { type: "number", description: "0-21600; explicit blocking wait." },
@@ -1386,13 +1406,15 @@ const TOOLS = [
       "Block until ALL given sessions finish (default 1h, max 6h) and return each result. The waits run " +
       "concurrently, so N agents take max(time), not sum(time). Use right after deepseek_start_many; Claude Code " +
       "auto-backgrounds this call and notifies you on completion. If it returns running sessions, call it again " +
-      "with the remaining ids — never loop with short waits. NON-BLOCKING ALTERNATIVE: run " +
+      "with the remaining ids — never loop with short waits. By default returns compact previews (use " +
+      "deepseek_result for full text); pass full=true for full output. NON-BLOCKING ALTERNATIVE: run " +
       "`dsh-wait <dsh_session_id> [...]` with Bash run_in_background instead; it waits outside this MCP call.",
     inputSchema: {
       type: "object",
       properties: {
         session_ids: { type: "array", minItems: 1, maxItems: 16, items: { type: "string" } },
         wait_seconds: { type: "number", description: "0-21600; default 3600" },
+        full: { type: "boolean", description: "false (default) = compact previews; true = full output per session" },
       },
       required: ["session_ids"],
     },
@@ -1464,13 +1486,13 @@ const TOOLS = [
     name: "deepseek_verify",
     description:
       "Run a test command in the session's cwd and return its exit code. If it fails, send the error back to the agent " +
-      "and retry up to retries times. Use after deepseek_wait, or set verify_command on start/resume.",
+      "and retry up to retries times. Use only this work's tests; the repo-wide gate stays with the coordinator. Use after deepseek_wait, or set verify_command on start/resume.",
     inputSchema: {
       type: "object",
       properties: {
         session_id: { type: "string" },
         command: { type: "string" },
-        retries: { type: "number", description: "0-5; default 0" },
+        retries: { type: "number", description: "0-5; default 0 (keep 0 for delegated tasks)" },
         timeout_seconds: { type: "number", description: "default 600" },
         wait_seconds: { type: "number", description: "how long to wait for the current turn; default 3600" },
       },

@@ -144,7 +144,7 @@ segurar a conversa por mais tempo.
 | `deepseek_resume(dsh_session_id, prompt, ...)` | reata a uma sessão persistida após crash/restart e manda um prompt |
 | `deepseek_send(session_id, message, ...)` | follow-up na mesma sessão |
 | `deepseek_wait(session_id, wait_seconds?)` | bloqueia até uma sessão terminar (default 1h) |
-| `deepseek_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo |
+| `deepseek_wait_all(session_ids[], wait_seconds?, full?)` | espera todas em paralelo; compacto por padrão |
 | `deepseek_status` / `deepseek_result` | status compacto / output acumulado (inclusive parcial) |
 | `deepseek_verify(session_id, command, retries?, ...)` | roda o teste, devolve exit code e reenvia o erro ao agente |
 | `deepseek_cancel` / `deepseek_close` | cancela o turno com relatório parcial / encerra e devolve o parcial |
@@ -159,16 +159,17 @@ segurar a conversa por mais tempo.
 | `agy_resume(conversation_id, prompt, ...)` | reata a uma conversa persistida após crash/restart e manda um prompt |
 | `agy_send(session_id, message, ...)` | follow-up; respawna se a sessão foi fechada por TTL |
 | `agy_wait(session_id, wait_seconds?)` | bloqueia até uma sessão terminar (default 10 min) |
-| `agy_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo |
+| `agy_wait_all(session_ids[], wait_seconds?, full?)` | espera todas em paralelo; compacto por padrão (`full=true` traz o texto) |
 | `agy_status` / `agy_result` | status compacto / output completo |
 | `agy_verify(session_id, command, retries?, ...)` | roda o teste, devolve exit code e reenvia o erro ao agente |
 | `agy_cancel` / `agy_close` | cancela / encerra e devolve o output parcial |
 | `agy_list` / `agy_conversations` | sessões vivas / conversas persistidas no disco |
 
-Modelos do agy: `gemini-4-argon-low|medium|high` e
-`gemini-3.8-flash-low|medium|high` (default `gemini-3.8-flash-high`);
-esforço `low|medium|high|xhigh|max` (default `high`). Veja a lista da sua conta
-com `agy models`.
+Modelos do agy: `gemini-4-argon-medium|high` e
+`gemini-3.8-flash-medium|high` (default `gemini-3.8-flash-high`). As variantes
+`-low` foram removidas: para contagem de imagens o modelo barato divergiu; use
+`high` como default. Veja a lista da sua conta com `agy models`.
+Esforço: `low|medium|high|xhigh|max` (default `high`).
 
 ## Como usar
 
@@ -209,12 +210,17 @@ deepseek_start(
   profile={
     "instructions": "Nunca leia o gabarito. Use a porta 9003.",
     "writable_dirs": ["data/saida/minha_trilha"],
-    "forbidden_paths": ["data/gold"]
+    "forbidden_paths": ["data/gold"],
+    "silent": true
   },
-  verify_command="pytest tests/ -q",
-  verify_retries=1
+  verify_command="pytest tests/maos/test_da_tarefa.py -q",
+  verify_retries=0
 )
 ```
+
+`silent: true` não revela as listas no prompt, mas a política continua valendo.
+Use no `verify_command` só os testes do trabalho delegado; o gate completo do
+repositório fica com o coordenador antes do commit.
 
 No agy, `forbidden_paths` viram `--tmpfs` e `writable_dirs` viram `--bind` no
 `bwrap`. No DSH, o shim coloca um wrapper de `host-spawn` no PATH que bloqueia
@@ -222,6 +228,8 @@ os caminhos proibidos e mounts fora das pastas permitidas; se uma tool tentar
 usar um caminho proibido, o turno é cancelado e o evento fica no log. O
 `verify_command` roda no `cwd` e, se falhar, o erro volta para o agente (até
 `verify_retries`).
+
+> Em tarefa delegada, use só os testes do próprio trabalho e mantenha `verify_retries=0`. O gate completo do repositório continua com o coordenador antes do commit.
 
 ## Retomar após crash/restart
 
@@ -260,3 +268,4 @@ precisar refazer o passo interrompido.
 ## Licença
 
 MIT — veja [LICENSE](LICENSE).
+
