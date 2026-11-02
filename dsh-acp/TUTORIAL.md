@@ -170,7 +170,7 @@ claude mcp add dsh-acp --scope local \
 | Tool | O que faz |
 |---|---|
 | `deepseek_start(prompt, cwd?, mode?, reasoning_effort?, wait?, wait_seconds?)` | cria **uma** sessão e volta em ~3s com `session_id` (`status: running`) |
-| `deepseek_start_many(tasks[])` | cria **N sessões em paralelo** numa única chamada (máx. 12) e devolve os `session_ids` |
+| `deepseek_start_many(tasks[])` | cria **N sessões em paralelo** numa única chamada (máx. 8) e devolve os `session_ids` |
 | `deepseek_send(session_id, message, wait?, wait_seconds?)` | dispara follow-up e volta; retorna `busy` se o turno anterior ainda roda |
 | `deepseek_wait(session_id, wait_seconds?)` | **bloqueia até uma sessão terminar** (default 1h, máx. 6h) e devolve o resultado |
 | `deepseek_wait_all(session_ids[], wait_seconds?)` | espera **todas** em paralelo; tempo total = o da mais lenta, não a soma |
@@ -260,7 +260,7 @@ momento, use `deepseek_result`; ele funciona com o turno em andamento.
 **Não intercale `start` e `wait`.** `start A → wait A → start B` faz o B só
 existir depois que o A termina. Para rodar N agentes ao mesmo tempo:
 
-1. `deepseek_start_many` com todas as tasks numa única chamada (máx. 12);
+1. `deepseek_start_many` com todas as tasks numa única chamada (máx. 8);
 2. `deepseek_wait_all` com os `session_ids` retornados.
 
 O tempo total é o da tarefa mais lenta, não a soma. Medido aqui: 3 agentes de

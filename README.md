@@ -22,7 +22,7 @@ background e notifica no fim) e fecha a sessão quando termina.
 ## Recursos
 
 - **Paralelo de verdade:** `deepseek_start_many` / `agy_start_many` iniciam N
-  sessões numa única chamada (até 12); `deepseek_wait_all` / `agy_wait_all`
+  sessões numa única chamada (até 8); `deepseek_wait_all` / `agy_wait_all`
   esperam todas ao mesmo tempo (tempo = a mais lenta, não a soma).
 - **Sem polling:** a chamada de `wait` é o canal de aviso. O Claude Code
   auto-backgrounda após 8s e acorda o modelo quando o turno termina.
@@ -123,7 +123,7 @@ segurar a conversa por mais tempo.
 | Tool | O que faz |
 |---|---|
 | `deepseek_start(prompt, cwd?, mode?, reasoning_effort?, wait?, wait_seconds?)` | cria uma sessão e volta em ~3s com `session_id` |
-| `deepseek_start_many(tasks[])` | inicia N sessões em paralelo (máx. 12) |
+| `deepseek_start_many(tasks[])` | inicia N sessões em paralelo (máx. 8) |
 | `deepseek_send(session_id, message, ...)` | follow-up na mesma sessão |
 | `deepseek_wait(session_id, wait_seconds?)` | bloqueia até uma sessão terminar (default 1h) |
 | `deepseek_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo |
@@ -136,7 +136,7 @@ segurar a conversa por mais tempo.
 | Tool | O que faz |
 |---|---|
 | `agy_start(prompt, cwd?, mode?, model?, effort?, wait?, wait_seconds?)` | cria uma sessão e volta rápido |
-| `agy_start_many(tasks[])` | inicia N sessões em paralelo (máx. 12) |
+| `agy_start_many(tasks[])` | inicia N sessões em paralelo (máx. 8) |
 | `agy_send(session_id, message, ...)` | follow-up; respawna se a sessão foi fechada por TTL |
 | `agy_wait(session_id, wait_seconds?)` | bloqueia até uma sessão terminar (default 10 min) |
 | `agy_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo |
