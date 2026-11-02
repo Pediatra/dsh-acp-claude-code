@@ -34,7 +34,7 @@ No Desktop, reinicie o app ou abra uma sessão nova; em sessão aberta:
 | Tool | O que faz |
 |---|---|
 | `agy_start(prompt, cwd?, mode?, model?, effort?, wait?, wait_seconds?)` | abre **uma** sessão e volta rápido com `session_id` |
-| `agy_start_many(tasks[])` | abre **N sessões em paralelo** numa chamada (máx. 8) |
+| `agy_start_many(tasks[])` | abre **N sessões em paralelo** numa chamada (máx. 12) |
 | `agy_send(session_id, message, wait?, wait_seconds?)` | follow-up; respawna a sessão se ela foi fechada por TTL |
 | `agy_wait(session_id, wait_seconds?)` | bloqueia até o turno terminar (default 10 min, máx. 1h) |
 | `agy_wait_all(session_ids[], wait_seconds?)` | espera todas em paralelo (tempo = a mais lenta) |

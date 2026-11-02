@@ -457,7 +457,7 @@ async function toolStart(args, progressToken) {
 async function toolStartMany(args) {
   const tasks = Array.isArray(args.tasks) ? args.tasks : [];
   if (tasks.length === 0) throw new Error("tasks must be a non-empty array");
-  if (tasks.length > 8) throw new Error("at most 8 tasks per call (each one is a bwrap+agy process)");
+  if (tasks.length > 12) throw new Error("at most 12 tasks per call (each one is a bwrap+agy process)");
   for (const [i, task] of tasks.entries()) {
     if (!task || typeof task.prompt !== "string" || !task.prompt.trim()) {
       throw new Error(`tasks[${i}].prompt is required`);
@@ -599,7 +599,7 @@ const TOOLS = [
   {
     name: "agy_start_many",
     description:
-      "Start N agy sessions CONCURRENTLY in one call (max 8) and return their session_ids. Use this when a task " +
+      "Start N agy sessions CONCURRENTLY in one call (max 12) and return their session_ids. Use this when a task " +
       "splits into parallel visual checks/agents. Follow with ONE agy_wait_all.",
     inputSchema: {
       type: "object",
@@ -607,7 +607,7 @@ const TOOLS = [
         tasks: {
           type: "array",
           minItems: 1,
-          maxItems: 8,
+          maxItems: 12,
           description: "One object per agent; each becomes its own bwrap+agy process.",
           items: {
             type: "object",
