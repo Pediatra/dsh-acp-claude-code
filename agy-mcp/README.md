@@ -62,7 +62,9 @@ No Desktop, reinicie o app ou abra uma sessão nova; em sessão aberta:
   `--dangerously-skip-permissions` para rodar comandos; o resto do FS continua
   read-only. Ainda assim, aponte `AGY_WORKSPACE` só para o projeto.
 
-Modelos: `gemini-3.8-flash-low|medium|high` (default `high`).
+Modelos: `gemini-4-argon-low|medium|high` e
+`gemini-3.8-flash-low|medium|high` (default `gemini-3.8-flash-high`).
+Liste os disponíveis na sua conta com `agy models`.
 Esforço: `low|medium|high|xhigh|max` (default `high`).
 
 **Trava de escrita para orquestradores:** `AGY_ALLOW_WRITE=0` rebaixa todo

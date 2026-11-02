@@ -144,8 +144,10 @@ segurar a conversa por mais tempo.
 | `agy_cancel` / `agy_close` | cancela / encerra e esquece |
 | `agy_list` | sessões abertas |
 
-Modelos do agy: `gemini-3.8-flash-low|medium|high` (default `high`);
-esforço `low|medium|high|xhigh|max` (default `high`).
+Modelos do agy: `gemini-4-argon-low|medium|high` e
+`gemini-3.8-flash-low|medium|high` (default `gemini-3.8-flash-high`);
+esforço `low|medium|high|xhigh|max` (default `high`). Veja a lista da sua conta
+com `agy models`.
 
 ## Como usar
 

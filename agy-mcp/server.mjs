@@ -24,6 +24,9 @@ const BWRAP = process.env.AGY_BWRAP || "/usr/bin/bwrap";
 const DEFAULT_MODEL = process.env.AGY_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_EFFORT = process.env.AGY_EFFORT || "high";
 const MODELS = [
+  "gemini-4-argon-low",
+  "gemini-4-argon-medium",
+  "gemini-4-argon-high",
   "gemini-3.8-flash-low",
   "gemini-3.8-flash-medium",
   "gemini-3.8-flash-high",
