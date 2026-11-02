@@ -311,6 +311,7 @@ class AcpSession {
     this.nextRpc = 1;
     this.output = "";
     this.toolCalls = [];
+    this.policyBlock = null;
     this.usage = null;
     this.stopReason = null;
     this.error = null;
@@ -439,7 +440,24 @@ class AcpSession {
         const title = u.title || u.kind || "tool";
         const command = extractToolCommand(u.rawInput);
         const paths = extractToolPaths(u.rawInput);
-        this.lastTool = { title, status: u.status || "pending", command, tool_call_id: u.toolCallId };
+        const hit = this.forbiddenHit(u.rawInput);
+        if (hit) {
+          this.policyBlock = {
+            path: hit,
+            tool_call_id: u.toolCallId,
+            command,
+            time: new Date().toISOString(),
+          };
+          this.recordTool({
+            event: "policy_block",
+            tool_call_id: u.toolCallId,
+            path: hit,
+            command,
+            raw_input: compactToolInput(u.rawInput),
+          });
+          this.notify("session/cancel", { sessionId: this.sessionId });
+        }
+        this.lastTool = { title, status: u.status || "pending", command, tool_call_id: u.toolCallId, policy_block: hit || undefined };
         this.toolCalls.push({
           tool_call_id: u.toolCallId,
           title,
@@ -447,6 +465,7 @@ class AcpSession {
           command,
           paths,
           exit_code: null,
+          policy_block: hit || undefined,
         });
         this.recordTool({
           event: "tool_call",
@@ -456,6 +475,7 @@ class AcpSession {
           status: u.status || "pending",
           command,
           paths,
+          policy_block: hit || undefined,
           raw_input: compactToolInput(u.rawInput),
         });
       } else if (u.sessionUpdate === "tool_call_update") {
@@ -562,6 +582,19 @@ class AcpSession {
       changed_files_truncated: files.length > 50,
       log: this.sessionId ? toolLogPath(this.sessionId) : null,
     };
+  }
+
+  /** Return the first forbidden path referenced by a tool input, if any. */
+  forbiddenHit(input) {
+    const forbidden = this.profile?.forbidden_paths || [];
+    if (forbidden.length === 0) return null;
+    const command = extractToolCommand(input) || "";
+    const paths = extractToolPaths(input);
+    for (const path of forbidden) {
+      if (command.includes(path)) return path;
+      if (paths.some((candidate) => candidate === path || candidate.startsWith(path + "/"))) return path;
+    }
+    return null;
   }
 
   fail(err) {
@@ -681,6 +714,7 @@ class AcpSession {
     this.clearIdleTimer();
     this.output = "";
     this.toolCalls = [];
+    this.policyBlock = null;
     this.stopReason = null;
     this.error = null;
     this.lastTool = null;
@@ -754,6 +788,7 @@ class AcpSession {
       output_chars: this.output.length,
       usage: this.usage,
       error: this.error,
+      policy_block: this.policyBlock,
       wait_command: this.sessionId ? `dsh-wait ${this.sessionId}` : null,
       state_file: this.sessionId ? statePath(this.sessionId) : null,
     };
@@ -770,7 +805,10 @@ class AcpSession {
       if (this.output.length > max) p.output_preview_truncated = true;
       if (this.busy) p.output_preview_partial = true;
     }
-    if (this.cancelRequestedAt) {
+    if (this.policyBlock) {
+      p.hint = `profile policy blocked forbidden path: ${this.policyBlock.path}`;
+      p.next = `deepseek_status(session_id="${this.id}") or deepseek_close(session_id="${this.id}")`;
+    } else if (this.cancelRequestedAt) {
       p.cancel_requested = true;
       p.hint = "cancellation requested; the agent has not acknowledged it yet";
       p.next = `deepseek_cancel(session_id="${this.id}") or deepseek_wait(session_id="${this.id}")`;

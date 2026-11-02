@@ -60,8 +60,8 @@ resultado quando o turno termina. Use o Bash `run_in_background` do Claude.
 
 No DSH, `forbidden_paths`/`writable_dirs` viram um wrapper de `host-spawn` no
 PATH; ele bloqueia caminhos proibidos e mounts de podman fora das pastas
-permitidas. O agente ainda pode ler um arquivo por ferramenta direta do DSH —
-o wrapper cobre a saída por `host-spawn`/container. O log de tools fica em
+permitidas. Se uma tool tentar usar um caminho proibido, o shim cancela o turno
+e registra `policy_block` no log. O log de tools fica em
 `~/.local/state/dsh-acp-mcp/sessions/<uuid>.tools.jsonl` com comando, saída e
 exit code; o resultado devolve só contagem e arquivos mudados.
 

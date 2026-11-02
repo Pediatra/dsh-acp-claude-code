@@ -218,8 +218,10 @@ deepseek_start(
 
 No agy, `forbidden_paths` viram `--tmpfs` e `writable_dirs` viram `--bind` no
 `bwrap`. No DSH, o shim coloca um wrapper de `host-spawn` no PATH que bloqueia
-os caminhos proibidos e mounts fora das pastas permitidas. O `verify_command`
-roda no `cwd` e, se falhar, o erro volta para o agente (até `verify_retries`).
+os caminhos proibidos e mounts fora das pastas permitidas; se uma tool tentar
+usar um caminho proibido, o turno é cancelado e o evento fica no log. O
+`verify_command` roda no `cwd` e, se falhar, o erro volta para o agente (até
+`verify_retries`).
 
 ## Retomar após crash/restart
 
