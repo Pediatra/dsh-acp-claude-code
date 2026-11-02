@@ -224,8 +224,10 @@ repositório fica com o coordenador antes do commit.
 
 No agy, `forbidden_paths` viram `--tmpfs` e `writable_dirs` viram `--bind` no
 `bwrap`. No DSH, o shim coloca um wrapper de `host-spawn` no PATH que bloqueia
-os caminhos proibidos e mounts fora das pastas permitidas; se uma tool tentar
-usar um caminho proibido, o turno é cancelado e o evento fica no log. O
+os caminhos proibidos e mounts fora das pastas permitidas; `writable_dirs`
+também entram no `sandbox-policy` (`additionalWritableRoots`), então as
+ferramentas nativas podem escrever nelas. Se uma tool tentar usar um caminho
+proibido, o turno é cancelado e o evento fica no log. O
 `verify_command` roda no `cwd` e, se falhar, o erro volta para o agente (até
 `verify_retries`).
 

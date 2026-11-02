@@ -295,9 +295,9 @@ dsh-wait <uuid> [<uuid> ...] --timeout 21600
 O `dsh-wait` lê `~/.local/state/dsh-acp-mcp/sessions/<uuid>.json`, usa
 `fs.watch` (sem polling) e imprime o resultado no fim. O `profile` da sessão
 aceita `instructions`, `writable_dirs`, `forbidden_paths` e `silent`; no DSH os
-caminhos viram um wrapper de `host-spawn` que bloqueia a saída por podman; uma
-tool que tente usar um caminho proibido cancela o turno e fica registrada no
-log. `silent: true` não revela as listas no prompt, mas o bloqueio continua. O
+caminhos viram um wrapper de `host-spawn` que bloqueia a saída por podman, e
+`writable_dirs` também entram no `additionalWritableRoots` do sandbox; uma tool
+que tente usar um caminho proibido cancela o turno e fica registrada no log. `silent: true` não revela as listas no prompt, mas o bloqueio continua. O
 log de cada tool (comando, saída e exit code) fica em `<uuid>.tools.jsonl`.
 
 `verify_command` roda no `cwd` no fim do turno. Se falhar, o erro volta ao

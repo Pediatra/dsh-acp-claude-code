@@ -65,8 +65,10 @@ tarefa delegada; o gate completo é do coordenador.
 
 No DSH, `forbidden_paths`/`writable_dirs` viram um wrapper de `host-spawn` no
 PATH; ele bloqueia caminhos proibidos e mounts de podman fora das pastas
-permitidas. Se uma tool tentar usar um caminho proibido, o shim cancela o turno
-e registra `policy_block` no log. O log de tools fica em
+permitidas. `writable_dirs` também entram no `sandbox-policy` via
+`additionalWritableRoots`, então as ferramentas nativas podem escrever nelas.
+Se uma tool tentar usar um caminho proibido, o shim cancela o turno e registra
+`policy_block` no log. O log de tools fica em
 `~/.local/state/dsh-acp-mcp/sessions/<uuid>.tools.jsonl` com comando, saída e
 exit code; o resultado devolve só contagem e arquivos mudados.
 

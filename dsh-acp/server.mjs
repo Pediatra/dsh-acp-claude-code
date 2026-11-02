@@ -334,6 +334,7 @@ class AcpSession {
     const args = [...prefix, "--profile", "acp", "--patch", OVERLAY];
 
     let policyFile = null;
+    let sandboxPatch = null;
     if (profile && (profile.forbidden_paths.length > 0 || profile.writable_dirs.length > 0)) {
       try {
         this.policyDir = path.join(STATE_DIR, "policy", `${this.id}-${process.pid}`);
@@ -341,12 +342,31 @@ class AcpSession {
         policyFile = path.join(this.policyDir, "profile.json");
         writeFileSync(policyFile, JSON.stringify({ cwd: this.cwd, ...profile }, null, 2) + "\n", { mode: 0o600 });
         writeFileSync(path.join(this.policyDir, "host-spawn"), HOST_SPAWN_POLICY, { mode: 0o755 });
+        if (profile.writable_dirs.length > 0) {
+          sandboxPatch = path.join(this.policyDir, "sandbox-patch.yml");
+          const roots = profile.writable_dirs
+            .map((root) => `      - ${JSON.stringify(root)}`)
+            .join("\n");
+          writeFileSync(
+            sandboxPatch,
+            "- id: sandbox-policy\n" +
+            "  name: '@deepseek-ai/dsh-sandbox-policy'\n" +
+            "  config:\n" +
+            "    mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'\n" +
+            "    workspaceRoot: !!js process.cwd()\n" +
+            "    additionalWritableRoots:\n" +
+            roots + "\n",
+            { mode: 0o600 },
+          );
+        }
       } catch (err) {
         log("policy setup failed:", err.message);
         this.policyDir = null;
         policyFile = null;
+        sandboxPatch = null;
       }
     }
+    if (sandboxPatch) args.push("--patch", sandboxPatch);
     const childPath = [this.policyDir, path.dirname(process.execPath), process.env.PATH]
       .filter(Boolean)
       .join(":");
