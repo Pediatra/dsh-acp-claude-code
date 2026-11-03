@@ -56,6 +56,7 @@ dsh-acp/     # copie para ~/.local/share/dsh-acp-mcp/
   server.mjs
   acp-overlay.yml
   bin/dsh-wait
+  bin/install-dsh.sh
   README.md
   TUTORIAL.md
 agy-mcp/     # copie para ~/.local/share/agy-mcp/
@@ -85,6 +86,9 @@ cp -r agy-mcp/* ~/.local/share/agy-mcp/
 mkdir -p ~/.local/bin
 cp dsh-acp/bin/dsh-wait agy-mcp/bin/agy-wait ~/.local/bin/
 chmod +x ~/.local/bin/dsh-wait ~/.local/bin/agy-wait
+
+# DSH fora do cache efêmero do npx (npm cache clean apaga o npx):
+bash dsh-acp/bin/install-dsh.sh
 ```
 
 ### Registrar no Claude Code

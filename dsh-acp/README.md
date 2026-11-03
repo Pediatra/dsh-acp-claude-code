@@ -136,8 +136,10 @@ O shim carrega esse arquivo no startup; depois reinicie a sessão ou rode
 ## Config
 
 - `DSH_ACP_WORKSPACE`: raiz permitida (default: `~/Projects/chorinho-dataset`).
-- `DSH_BIN`: caminho do binário `dsh` (senão procura em `~/.local/bin` e no
-  cache do `npx`; último recurso `npx -y @deepseek-ai/dsh@0.2.1-rc.2`).
+- `DSH_BIN`: caminho do binário `dsh` (senão procura em `~/.local/bin`, em
+  `~/.local/share/dsh-stable` e, por último, num cache do `npx` já populado).
+  **Não** chama `npx` para instalar: um `npm cache clean` apaga o cache e a
+  inicialização passaria de 30 s. Rode `bin/install-dsh.sh`.
 - `DSH_ACP_DEBUG=1`: log em stderr.
 
 Registrado no Claude Code com escopo `local` (só neste projeto, em

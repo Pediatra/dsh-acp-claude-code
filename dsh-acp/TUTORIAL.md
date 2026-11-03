@@ -352,6 +352,7 @@ Implementação:
 | Tool não aparece em sessão antiga | feche/reabra a sessão; `/mcp reconnect dsh-acp` |
 | `mcp__agy__*` não aparece no DSH | overlay sem a entrada `insert`/`mcp-agy`; confira com `--dump-config` e reinicie a sessão |
 | `dsh acp exited` / métodos estranhos | DSH mudou de versão; o shim é acoplado à 0.2.x |
+| `ACP initialize timed out` | o binário sumiu (ex.: `npm cache clean --force` apagou o `npx`). Rode `bin/install-dsh.sh`; o shim usa `~/.local/bin/dsh`. |
 | Resultado vazio | veja `deepseek_status`; se `error`, leia a mensagem |
 
 **Segurança:** o agente delegado tem as ferramentas do DSH. Em `read-only`,

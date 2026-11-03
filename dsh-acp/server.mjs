@@ -50,6 +50,12 @@ const DEBUG = process.env.DSH_ACP_DEBUG === "1";
 const DEFAULT_WAIT_SECONDS = 3_600;
 const MAX_WAIT_SECONDS = 21_600;
 const PROGRESS_INTERVAL_MS = 20_000;
+// Cold starts used to time out at 30 s while npx was reinstalling the whole
+// dependency tree. A stable binary starts in seconds; keep a generous margin.
+const INIT_TIMEOUT_MS = (() => {
+  const n = Number(process.env.DSH_ACP_INIT_TIMEOUT_MS ?? 120_000);
+  return Number.isFinite(n) && n > 0 ? n : 120_000;
+})();
 // Close the ACP process after this many idle seconds (0 disables). The session
 // is removed from the map, so a follow-up needs a new deepseek_start.
 const IDLE_TTL_SECONDS = (() => {
@@ -98,9 +104,18 @@ function findDsh() {
   const explicit = process.env.DSH_BIN;
   if (explicit && existsSync(explicit)) return { cmd: explicit, prefix: [] };
 
+  // Stable installation: survives `npm cache clean`, npm updates and npx
+  // cache pruning. install-dsh.sh creates this symlink.
   const local = path.join(os.homedir(), ".local", "bin", "dsh");
   if (existsSync(local)) return { cmd: local, prefix: [] };
 
+  const stable = path.join(
+    os.homedir(), ".local", "share", "dsh-stable", "node_modules", ".bin", "dsh",
+  );
+  if (existsSync(stable)) return { cmd: stable, prefix: [] };
+
+  // Last resort for an already-populated npx cache. Never invoke npx here:
+  // a cold install takes minutes and the ACP initialize deadline expires.
   const npxRoot = path.join(os.homedir(), ".npm", "_npx");
   if (existsSync(npxRoot)) {
     const candidates = [];
@@ -112,7 +127,10 @@ function findDsh() {
     if (candidates.length > 0) return { cmd: candidates[0], prefix: [] };
   }
 
-  return { cmd: "npx", prefix: ["-y", "@deepseek-ai/dsh@0.2.1-rc.2"] };
+  throw new Error(
+    "dsh binary not found. Run dsh-acp/bin/install-dsh.sh (or set DSH_BIN). " +
+    "The npx cache is ephemeral and npm cache clean removes it.",
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -674,17 +692,17 @@ class AcpSession {
   }
 
   async init({ configure = true } = {}) {
-    await this.request("initialize", { protocolVersion: 1, clientCapabilities: {} }, 30_000);
+    await this.request("initialize", { protocolVersion: 1, clientCapabilities: {} }, INIT_TIMEOUT_MS);
     let state;
     if (this.resumeSessionId) {
       state = await this.request(
         "session/resume",
         { sessionId: this.resumeSessionId, cwd: this.cwd, mcpServers: [] },
-        60_000,
+        INIT_TIMEOUT_MS,
       );
       this.sessionId = this.resumeSessionId;
     } else {
-      state = await this.request("session/new", { cwd: this.cwd, mcpServers: [] }, 30_000);
+      state = await this.request("session/new", { cwd: this.cwd, mcpServers: [] }, INIT_TIMEOUT_MS);
       this.sessionId = state.sessionId;
     }
     let options = state.configOptions || [];
