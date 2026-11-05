@@ -3,7 +3,7 @@
 # ~/.local/bin/dsh. O shim procura esse caminho primeiro.
 set -euo pipefail
 
-VERSION="${1:-0.2.2-alpha.2}"
+VERSION="${1:-0.2.2-alpha.3}"
 PREFIX="${DSH_STABLE_PREFIX:-$HOME/.local/share/dsh-stable}"
 NPM="${DSH_NPM:-$HOME/.local/share/dsh-acp-mcp/node/bin/npm}"
 if [[ ! -x "$NPM" ]]; then
