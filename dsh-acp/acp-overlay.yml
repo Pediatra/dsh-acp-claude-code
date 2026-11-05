@@ -42,3 +42,12 @@
           AGY_WORKSPACE: !!js process.env.AGY_WORKSPACE || process.env.DSH_ACP_WORKSPACE || process.cwd()
           AGY_ALLOW_WRITE: !!js "process.env.DSH_PERMISSION_MODE === 'read-only' ? '0' : '1'"
         toolCallTimeoutMs: 600000
+
+# O gateway OpenCode Go rejeita os campos de extensão dsh_session_log e
+# dsh_plugin_packages com HTTP 503 (mesmo motivo do perfil web).
+- id: session-log-deepseek
+  config:
+    enabled: false
+- id: plugin-package-inventory-deepseek
+  config:
+    enabled: false
