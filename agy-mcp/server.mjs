@@ -21,12 +21,19 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
 const WORKSPACE = path.resolve(process.env.AGY_WORKSPACE || process.cwd());
 const BWRAP = process.env.AGY_BWRAP || "/usr/bin/bwrap";
-const DEFAULT_MODEL = process.env.AGY_MODEL || "gemini-3.8-flash-high";
+// Auto routing: try the primary model first and, only when its quota/credits
+// are exhausted, respawn the same prompt on the fallback model.
+const AUTO_MODEL = "auto";
+// Sonnet always runs at medium and the Gemini family always at high, no matter
+// what the caller asks for. normalizeModel() enforces this.
+const PRIMARY_MODEL = process.env.AGY_PRIMARY_MODEL || "claude-sonnet-5-5-medium";
+const FALLBACK_MODEL = process.env.AGY_FALLBACK_MODEL || "gemini-3.8-flash-high";
+const DEFAULT_MODEL = process.env.AGY_MODEL || AUTO_MODEL;
 const DEFAULT_EFFORT = process.env.AGY_EFFORT || "high";
 const MODELS = [
-  "gemini-4-argon-medium",
+  AUTO_MODEL,
+  "claude-sonnet-5-5-medium",
   "gemini-4-argon-high",
-  "gemini-3.8-flash-medium",
   "gemini-3.8-flash-high",
 ];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -121,6 +128,33 @@ function parseExitCode(text) {
   const match = /(?:exited with code|exit code:?)\s*(-?\d+)/i.exec(text)
     || /\[exit code:\s*(-?\d+)\]/i.exec(text);
   return match ? Number(match[1]) : null;
+}
+
+// Signals agy uses when the model's plan quota / AI credits are gone.
+// The canonical one is the gRPC-ish `INSUFFICIENT_G1_CREDITS_BALANCE`, but the
+// CLI also prints human text such as "AI: Out of credits".
+const CREDIT_EXHAUSTED_RE = new RegExp([
+  "INSUFFICIENT_[A-Z0-9_]*CREDIT",
+  "insufficient[^\\n]{0,40}credit",
+  "credit[^\\n]{0,40}(?:exhaust|insufficient|balance|depleted|out of)",
+  "(?:out of|no)[^\\n]{0,20}credits?",
+  "quota[^\\n]{0,40}(?:exceed|exhaust)",
+  "RESOURCE_EXHAUSTED",
+].join("|"), "i");
+
+function isCreditExhaustion(text) {
+  return CREDIT_EXHAUSTED_RE.test(String(text || ""));
+}
+
+function resultErrorText(result) {
+  if (!result || typeof result !== "object") return "";
+  return [
+    result.status,
+    result.error,
+    result.short_error,
+    result.message,
+    result.response,
+  ].filter(Boolean).join(" | ");
 }
 
 function normalizeProfile(raw, cwd) {
@@ -248,7 +282,7 @@ const SESSION_PREFIX = (process.env.AGY_SESSION_PREFIX || Math.random().toString
   .slice(0, 6) || "x";
 
 class AgySession {
-  constructor({ mode, modeRequested, cwd, model, modelRequested = null, modelNote = null, effort, effortSource = "default", conversationId = null, profile = null }) {
+  constructor({ mode, modeRequested, cwd, model, modelRequested = null, modelNote = null, effort, effortSource = "default", conversationId = null, profile = null, router = null }) {
     this.id = `g${SESSION_PREFIX}-${nextSession++}`;
     this.mode = mode;
     this.modeRequested = modeRequested || mode;
@@ -256,6 +290,7 @@ class AgySession {
     this.model = model;
     this.modelRequested = modelRequested || model;
     this.modelNote = modelNote;
+    this.router = router;
     this.effort = effort;
     this.effortSource = effortSource;
     this.profile = profile;
@@ -264,8 +299,11 @@ class AgySession {
     this.permissionMode = null;
     this.proc = null;
     this.buf = "";
+    this.stderrTail = "";
     this.output = "";
     this.streamText = "";
+    this.currentPrompt = null;
+    this.turnCount = 0;
     this.lastTool = null;
     this.toolCalls = [];
     this.activeTools = new Map();
@@ -281,6 +319,8 @@ class AgySession {
     this.emptyRetryUsed = false;
     this.retryNote = null;
     this.idleTimer = null;
+    this.stateWriteTimer = null;
+    this.lastStateWriteAt = 0;
   }
 
   spawnProcess() {
@@ -292,7 +332,7 @@ class AgySession {
       conversationId: this.conversationId,
       profile: this.profile,
     });
-    this.proc = spawn(cmd, args, {
+    const proc = spawn(cmd, args, {
       cwd,
       env: {
         ...process.env,
@@ -301,13 +341,23 @@ class AgySession {
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
+    this.proc = proc;
     this.buf = "";
-    this.proc.stdout.setEncoding("utf8");
-    this.proc.stdout.on("data", (d) => this.onData(d));
-    this.proc.stderr.setEncoding("utf8");
-    this.proc.stderr.on("data", (d) => log("agy stderr:", d.trim()));
-    this.proc.on("error", (e) => this.fail(e));
-    this.proc.on("exit", (code, signal) => {
+    proc.stdout.setEncoding("utf8");
+    proc.stdout.on("data", (d) => {
+      if (this.proc === proc) this.onData(d);
+    });
+    proc.stderr.setEncoding("utf8");
+    proc.stderr.on("data", (d) => {
+      if (this.proc !== proc) return;
+      this.stderrTail = (this.stderrTail + d).slice(-8192);
+      log("agy stderr:", d.trim());
+    });
+    proc.on("error", (e) => {
+      if (this.proc === proc) this.fail(e);
+    });
+    proc.on("exit", (code, signal) => {
+      if (this.proc !== proc) return;
       if (this.cancelled) return;
       if (this.status === "running") {
         this.fail(new Error(`agy exited (code=${code} signal=${signal})`));
@@ -414,6 +464,10 @@ class AgySession {
       const text = this.output || this.streamText || "";
       const denied = Array.isArray(this.denied) ? this.denied : [];
 
+      if (r.status !== "SUCCESS" && this.tryCreditFallback(resultErrorText(r))) {
+        return;
+      }
+
       if (r.status === "SUCCESS" && !String(text).trim()) {
         this.status = "error";
         this.error = denied.length > 0
@@ -451,9 +505,67 @@ class AgySession {
     }
   }
 
+  /** Switch an auto-routed session to the fallback model and replay the turn. */
+  tryCreditFallback(reasonText) {
+    if (!this.router || this.router.used_fallback || !this.currentPrompt) return false;
+    const combined = `${reasonText || ""}\n${this.stderrTail || ""}`;
+    if (!isCreditExhaustion(combined)) return false;
+    this.restartWithFallback(reasonText || combined);
+    return true;
+  }
+
+  restartWithFallback(reasonText) {
+    const from = this.model;
+    const prompt = this.currentPrompt;
+    this.router.used_fallback = true;
+    this.router.from = from;
+    this.router.to = FALLBACK_MODEL;
+    this.router.reason = String(reasonText || "").replace(/\s+/g, " ").slice(0, 500);
+    this.router.at = new Date().toISOString();
+    this.model = FALLBACK_MODEL;
+    const level = effortFromModel(FALLBACK_MODEL);
+    if (level) {
+      this.effort = level;
+      this.effortSource = "model";
+    }
+    this.modelNote = `auto: ${from} sem créditos; caiu para ${FALLBACK_MODEL}`;
+    log(`credit fallback on ${this.id}: ${from} -> ${FALLBACK_MODEL} (${this.router.reason})`);
+    const replay = this.turnCount > 1
+      ? `[A sessão anterior ficou sem créditos e foi reiniciada no modelo ${FALLBACK_MODEL}; o contexto anterior não está disponível. Refaça a tarefa a partir do estado atual dos arquivos.]\n\n${prompt}`
+      : prompt;
+
+    // Drop the failed process without letting its exit handler report an error.
+    this.cancelled = true;
+    try { this.proc?.kill("SIGKILL"); } catch {}
+    this.proc = null;
+    this.buf = "";
+    this.conversationId = null;
+    this.stderrTail = "";
+    this.output = "";
+    this.streamText = "";
+    this.lastTool = null;
+    this.toolCalls = [];
+    this.activeTools = new Map();
+    this.denied = null;
+    this.stopReason = null;
+    this.error = null;
+    this.status = "starting";
+
+    setTimeout(() => {
+      if (this.closed || this.status !== "starting" || !prompt) return;
+      try {
+        this.ensureProcess();
+        this.startTurn(replay, { internal: true, keepTurn: true });
+      } catch (err) {
+        this.fail(err);
+      }
+    }, 800);
+  }
+
   /** Persist the state the out-of-band agy-wait command reads. */
   writeState(extra = {}) {
     if (!this.conversationId) return;
+    this.lastStateWriteAt = Date.now();
     try {
       writeJsonAtomic(statePath(this.conversationId), {
         ...this.basePayload(),
@@ -468,6 +580,27 @@ class AgySession {
     } catch (err) {
       log("state write failed:", err.message);
     }
+  }
+
+  /** Refresh the state file while tools run, at most once per interval. */
+  scheduleStateWrite(minIntervalMs = 2000) {
+    if (this.stateWriteTimer) return;
+    const wait = Math.max(0, minIntervalMs - (Date.now() - this.lastStateWriteAt));
+    if (wait === 0) {
+      this.writeState();
+      return;
+    }
+    this.stateWriteTimer = setTimeout(() => {
+      this.stateWriteTimer = null;
+      this.writeState();
+    }, wait);
+    this.stateWriteTimer.unref?.();
+  }
+
+  clearStateWrite() {
+    if (!this.stateWriteTimer) return;
+    clearTimeout(this.stateWriteTimer);
+    this.stateWriteTimer = null;
   }
 
   writeOutput() {
@@ -488,6 +621,7 @@ class AgySession {
         conversation_id: this.conversationId,
         ...entry,
       }) + "\n", { mode: 0o600 });
+      this.scheduleStateWrite();
     } catch (err) {
       log("tool log write failed:", err.message);
     }
@@ -511,8 +645,10 @@ class AgySession {
 
   fail(err) {
     if (this.status === "error") return;
+    const message = err?.message || String(err);
+    if (this.tryCreditFallback(message)) return;
     this.status = "error";
-    this.error = err?.message || String(err);
+    this.error = message;
     this.writeOutput();
     this.writeState();
     this.finishTurn();
@@ -547,7 +683,7 @@ class AgySession {
     this.idleTimer.unref?.();
   }
 
-  startTurn(text, { internal = false } = {}) {
+  startTurn(text, { internal = false, keepTurn = false } = {}) {
     if (this.status === "running") throw new Error("session is busy; wait for the current turn");
     if (!internal) {
       this.emptyRetryUsed = false;
@@ -556,6 +692,8 @@ class AgySession {
     this.clearIdleTimer();
     this.closed = false;
     this.ensureProcess();
+    this.currentPrompt = text;
+    this.turnCount = (this.turnCount || 0) + 1;
     this.output = "";
     this.streamText = "";
     this.lastTool = null;
@@ -566,7 +704,9 @@ class AgySession {
     this.stopReason = null;
     this.turnStartedAt = Date.now();
     this.status = "running";
-    this.turnDone = new Promise((resolve) => { this.turnResolve = resolve; });
+    if (!keepTurn) {
+      this.turnDone = new Promise((resolve) => { this.turnResolve = resolve; });
+    }
     this.writeState();
     this.proc.stdin.write(JSON.stringify({
       event: "user",
@@ -603,6 +743,7 @@ class AgySession {
       model: this.model,
       model_requested: this.modelRequested,
       model_note: this.modelNote,
+      router: this.router,
       effort: this.effort,
       effort_source: this.effortSource,
       profile: profileSummary(this.profile),
@@ -610,7 +751,7 @@ class AgySession {
       elapsed_seconds: this.elapsedSeconds(),
       stop_reason: this.stopReason,
       last_tool: this.lastTool,
-      output_chars: this.output.length,
+      output_chars: (this.output || this.streamText).length,
       usage: this.usage,
       denied_actions: this.denied,
       error: this.error,
@@ -657,6 +798,7 @@ class AgySession {
 
   cancel() {
     this.cancelled = true;
+    this.clearStateWrite();
     try { this.proc?.kill("SIGKILL"); } catch {}
     this.proc = null;
     this.status = "cancelled";
@@ -669,6 +811,7 @@ class AgySession {
   close() {
     this.closed = true;
     this.clearIdleTimer();
+    this.clearStateWrite();
     this.cancelled = true;
     this.status = "closed";
     this.stopReason = "closed";
@@ -709,7 +852,15 @@ function normalizeMode(raw) {
 }
 
 function normalizeModel(raw) {
-  return MODELS.includes(raw) ? raw : DEFAULT_MODEL;
+  if (raw === undefined || raw === null || raw === "") return DEFAULT_MODEL;
+  const wanted = String(raw).trim();
+  if (wanted === AUTO_MODEL) return AUTO_MODEL;
+  // Fixed levels per family, regardless of the requested variant:
+  // Sonnet -> medium; Argon and Flash -> high.
+  if (/^claude-sonnet(?:-|$)/.test(wanted)) return "claude-sonnet-5-5-medium";
+  if (/^gemini-4-argon(?:-|$)/.test(wanted)) return "gemini-4-argon-high";
+  if (/^gemini-3\.8-flash(?:-|$)/.test(wanted)) return "gemini-3.8-flash-high";
+  return DEFAULT_MODEL;
 }
 
 function normalizeEffort(raw) {
@@ -744,15 +895,23 @@ async function createSession(args, { conversationId = null } = {}) {
     log("workspace-write requested but AGY_ALLOW_WRITE=0; downgrading to read-only");
   }
   const cwd = resolveCwd(args.cwd);
-  const model = normalizeModel(args.model);
-  const modelNote = args.model && args.model !== model
-    ? `model ${args.model} is not allowed; using ${model}`
+  const requestedModel = normalizeModel(args.model);
+  const autoRoute = requestedModel === AUTO_MODEL;
+  const model = autoRoute ? PRIMARY_MODEL : requestedModel;
+  const router = autoRoute
+    ? { mode: "auto", primary: PRIMARY_MODEL, fallback: FALLBACK_MODEL, used_fallback: false }
     : null;
+  let modelNote = null;
+  if (autoRoute) {
+    modelNote = `auto: tenta ${PRIMARY_MODEL}; cai para ${FALLBACK_MODEL} se os créditos acabarem`;
+  } else if (args.model && args.model !== requestedModel) {
+    modelNote = `model ${args.model} normalized to ${requestedModel} (fixed effort per family)`;
+  }
   const modelLevel = effortFromModel(model);
   const effort = modelLevel || normalizeEffort(args.effort);
   const effortSource = modelLevel ? "model" : (args.effort !== undefined ? "argument" : "default");
   const profile = normalizeProfile(args.profile, cwd);
-  const session = new AgySession({ mode, modeRequested, cwd, model, modelRequested: args.model || model, modelNote, effort, effortSource, conversationId, profile });
+  const session = new AgySession({ mode, modeRequested, cwd, model, modelRequested: requestedModel, modelNote, router, effort, effortSource, conversationId, profile });
   sessions.set(session.id, session);
   try {
     session.spawnProcess();
@@ -1114,7 +1273,7 @@ const TOOLS = [
         prompt: { type: "string", description: "Self-contained task. Name files by path; the agent can read them." },
         cwd: { type: "string", description: "Working directory inside the workspace (default: workspace root)." },
         mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
-        model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL}` },
+        model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL} (auto: ${PRIMARY_MODEL} first, ${FALLBACK_MODEL} if credits run out)` },
         effort: { type: "string", enum: EFFORTS, description: `default ${DEFAULT_EFFORT}` },
         profile: PROFILE_SCHEMA,
         verify_command: { type: "string", description: "Optional test of THIS delegated work, not the repo-wide gate. If it fails, the agent gets the error; keep verify_retries=0 for delegated tasks." },
@@ -1145,7 +1304,7 @@ const TOOLS = [
               prompt: { type: "string" },
               cwd: { type: "string" },
               mode: { type: "string", enum: ["read-only", "workspace-write"] },
-              model: { type: "string", enum: MODELS },
+              model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL} (auto: ${PRIMARY_MODEL} then ${FALLBACK_MODEL})` },
               effort: { type: "string", enum: EFFORTS },
               profile: PROFILE_SCHEMA,
             },
@@ -1170,7 +1329,7 @@ const TOOLS = [
         prompt: { type: "string", description: "Message to send on resume, e.g. 'Continue de onde parou'" },
         cwd: { type: "string", description: "Working directory inside the project (default: project root)" },
         mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
-        model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL}` },
+        model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL} (auto: ${PRIMARY_MODEL} first, ${FALLBACK_MODEL} if credits run out)` },
         effort: { type: "string", enum: EFFORTS, description: `default ${DEFAULT_EFFORT}` },
         profile: PROFILE_SCHEMA,
         verify_command: { type: "string", description: "Optional test of THIS delegated work, not the repo-wide gate. If it fails, the agent gets the error; keep verify_retries=0 for delegated tasks." },
