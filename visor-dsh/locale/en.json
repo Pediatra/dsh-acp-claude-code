@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session viewer (read-only)",
+    "description": "Follow DSH sessions persisted by another process without taking their session lock."
+  }
+}

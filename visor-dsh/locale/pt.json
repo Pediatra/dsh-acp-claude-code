@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Visor de sessões (somente leitura)",
+    "description": "Acompanha sessões do DSH persistidas por outro processo sem tomar o lock delas."
+  }
+}
