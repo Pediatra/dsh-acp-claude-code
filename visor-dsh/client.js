@@ -1008,6 +1008,7 @@ window.__ModuleLoader__.load({
 
       const hasReadError = typeof meta?.readError === "string" && meta.readError.length > 0;
       const showEmpty = turns.length === 0;
+      const emptyError = feed.error ?? (hasReadError ? meta.readError : null);
       const emptyKind = meta === null
         ? (sessionId !== null && feed.error
           ? "error"
@@ -1016,7 +1017,7 @@ window.__ModuleLoader__.load({
             : "choose")
         : !meta.hasLog
           ? "no-log"
-          : feed.error && feed.items.length === 0
+          : emptyError && feed.items.length === 0
             ? "error"
             : "empty";
 
@@ -1064,7 +1065,7 @@ window.__ModuleLoader__.load({
               showEmpty
                 ? h(EmptyPane, {
                   kind: emptyKind,
-                  meta: feed.error && feed.items.length === 0 ? feed.error : meta,
+                  meta: emptyError && feed.items.length === 0 ? emptyError : meta,
                   t,
                   onRetry,
                 })
