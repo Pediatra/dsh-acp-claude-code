@@ -4,6 +4,9 @@
 # vendored runtime (static Node, etc.)
 node/
 
+# session context exports (large, local only)
+contexto-opencode-*/
+
 # local noise
 *.log
 *.bak
