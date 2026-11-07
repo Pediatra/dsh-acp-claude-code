@@ -828,3 +828,35 @@ Números de linha aproximados, conferidos em 2026-11-06; usar os nomes de funç�
 - cache de catálogo com `agy` falso;
 - placar após reinício;
 - passada real com mosaicos (o teste que mais importa).
+
+---
+
+## Problema em aberto (não aprovado): opção 3 — sessão única no `dsh web` ou observer upstream
+
+**Registrado em 2026-11-07. Isto é um problema de arquitetura em aberto, não uma
+tarefa aprovada; não implementar sem decisão explícita do dono.**
+
+O `dsh web` não é leitor passivo: ao abrir uma sessão ele chama `agents.resume` e
+exige o `flock` exclusivo de `session.lock`. O processo ACP segura esse lock
+enquanto vive, mesmo idle, então a GUI recebe `session/writer-held` e mostra
+`error.sessionInUse`. A alternativa atual é o **visor-dsh** (plugin do profile
+`web`): ele lê `session.v4.jsonl.zstd` e mostra os turnos na GUI sem tocar no
+lock, mas é um paliativo *downstream* — depende do log persistido e não é o modo
+observador de primeira classe que a GUI precisa.
+
+Duas saídas possíveis, ainda não escolhidas:
+
+1. **Rodar as sessões dentro do `dsh web` e o Claude falar por API.** O bridge
+   ACP deixaria de ser o dono do processo/sessão; o Claude chamaria a API do DSH
+   web. Elimina a disputa de lock, mas muda o modelo de execução, autenticação,
+   ciclo de vida e o contrato do bridge.
+2. **Modo observer upstream usando `sessionQuery.observeSession`.** Expor na GUI
+   uma leitura explícita de sessões possuídas por outro processo, apoiada em
+   `sessionQuery.observeSession`/`observeEvent`/`observeProjections` e em um
+   contrato de acompanhamento de log entre processos. Precisa definir
+   propriedade, latência, autorização, paginação, reconciliação de `seq` e o que
+   fazer quando o writer está no meio de um frame.
+
+O visor-dsh atual não decide essa questão: ele é somente leitura, não fala ACP e
+não substitui o observer upstream. A decisão de produto/arquitetura continua
+aberta.
