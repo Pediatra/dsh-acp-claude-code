@@ -17,6 +17,10 @@ test("client.js registra main e sidebar.panellist no locale visor-dsh", async ()
   assert.match(code, /\.visor-subline > span\s*\{\s*min-width:\s*0;\s*overflow-wrap:\s*anywhere/u);
   assert.match(code, /\.visor-root:not\(\.is-side-open\) \.visor-side\s*\{\s*display:\s*none/u);
   assert.match(code, /\.visor-side-toggle\s*\{\s*display:\s*inline-flex/u);
+  assert.match(code, /"status\.idle": "Idle"/u);
+  assert.match(code, /"status\.idle": "Ocioso"/u);
+  assert.match(code, /"turn\.openStopped": "aberto \/ sem atividade"/u);
+  assert.match(code, /function LiveBadge\(\{ meta, t \}\)/u);
   let moduleDefinition;
   const sandbox = {
     window: {

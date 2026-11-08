@@ -29,6 +29,7 @@ window.__ModuleLoader__.load({
       "list.owner": "owner {pid}",
       "list.live": "live",
       "status.live": "Live",
+      "status.idle": "Idle",
       "status.stopped": "Stopped",
       "status.ownerSelf": "Owner: this dsh web (PID {pid})",
       "status.ownerExternal": "External owner: {label} (PID {pid})",
@@ -82,7 +83,7 @@ window.__ModuleLoader__.load({
       "turn.interrupted": "interrupted",
       "turn.aborted": "aborted",
       "turn.error": "error",
-      "turn.openStopped": "open / stopped",
+      "turn.openStopped": "open / no activity",
       "turn.open": "open",
       "turn.ended": "ended",
       "turn.step": "step {step}",
@@ -132,6 +133,7 @@ window.__ModuleLoader__.load({
       "list.owner": "dono {pid}",
       "list.live": "ao vivo",
       "status.live": "Ao vivo",
+      "status.idle": "Ocioso",
       "status.stopped": "Parado",
       "status.ownerSelf": "Dono: este dsh web (PID {pid})",
       "status.ownerExternal": "Dono externo: {label} (PID {pid})",
@@ -185,7 +187,7 @@ window.__ModuleLoader__.load({
       "turn.interrupted": "interrompido",
       "turn.aborted": "abortado",
       "turn.error": "erro",
-      "turn.openStopped": "aberto / parado",
+      "turn.openStopped": "aberto / sem atividade",
       "turn.open": "aberto",
       "turn.ended": "encerrado",
       "turn.step": "passo {step}",
@@ -296,6 +298,7 @@ window.__ModuleLoader__.load({
       .visor-session-id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .8; }
       .visor-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-label-secondary); flex: none; }
       .visor-dot.is-live { background: var(--dsw-alias-state-success-primary); animation: visor-pulse 1.8s ease-in-out infinite; }
+      .visor-dot.is-idle { background: var(--dsw-alias-state-idle-primary); }
       .visor-dot.is-owner { background: var(--dsw-alias-state-warn-primary); }
       .visor-main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
       .visor-header {
@@ -884,10 +887,14 @@ window.__ModuleLoader__.load({
       return h("span", { className: `visor-badge ${tone ? `is-${tone}` : ""}`, title }, children);
     }
 
-    function LiveBadge({ live, t }) {
-      return h(Badge, { tone: live ? "live" : "stopped" },
-        h("span", { className: `visor-dot ${live ? "is-live" : ""}`, "aria-hidden": "true" }),
-        live ? t("status.live") : t("status.stopped"),
+    function LiveBadge({ meta, t }) {
+      const live = meta?.live === true;
+      const owned = Array.isArray(meta?.owner) && meta.owner.length > 0;
+      const tone = live ? "live" : owned ? "idle" : "stopped";
+      const label = live ? t("status.live") : owned ? t("status.idle") : t("status.stopped");
+      return h(Badge, { tone },
+        h("span", { className: `visor-dot ${live ? "is-live" : owned ? "is-idle" : ""}`, "aria-hidden": "true" }),
+        label,
       );
     }
 
@@ -1361,7 +1368,7 @@ window.__ModuleLoader__.load({
                   strokeLinecap: "round", "aria-hidden": true, focusable: "false",
                   style: { display: "block" },
                 }, h("path", { d: "M4 6h16M4 12h16M4 18h16" }))),
-                h(LiveBadge, { live: meta.live, t }),
+                h(LiveBadge, { meta, t }),
                 h(OwnerBadge, { meta, t }),
                 meta.truncated ? h(Badge, { tone: "owner" }, t("status.truncated")) : null,
                 meta.degraded ? h(Badge, { tone: "error" }, t("status.readError")) : null,
