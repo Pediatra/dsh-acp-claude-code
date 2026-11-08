@@ -91,6 +91,11 @@ window.__ModuleLoader__.load({
       "turn.abortedDetail": "Turn aborted ({reason}).",
       "turn.errorDetail": "Turn ended with an error: {detail}",
       "turn.genericDetail": "Turn ended with reason {reason}.",
+      "timeline.omittedEmpty": "{count} turn(s) without recorded messages were omitted.",
+      "timeline.omittedEmptyDetails": "Why?",
+      "timeline.omittedEmptyHint": "They ended before a user or assistant message was committed. The log has no content for them; nothing was deleted by the viewer.",
+      "timeline.turnSummary": "Turn {number} — {reason}",
+      "timeline.noContent": "No turn with recorded messages.",
       "user.label": "User",
       "user.agent": "Agent",
       "assistant.label": "Assistant",
@@ -189,6 +194,11 @@ window.__ModuleLoader__.load({
       "turn.abortedDetail": "Turno abortado ({reason}).",
       "turn.errorDetail": "Turno encerrado com erro: {detail}",
       "turn.genericDetail": "Turno encerrado com motivo {reason}.",
+      "timeline.omittedEmpty": "{count} turno(s) sem mensagens registradas foram omitidos.",
+      "timeline.omittedEmptyDetails": "Por quê?",
+      "timeline.omittedEmptyHint": "Eles terminaram antes de uma mensagem do usuário ou do assistente ser gravada. O log não tem conteúdo para eles; o visor não apagou nada.",
+      "timeline.turnSummary": "Turno {number} — {reason}",
+      "timeline.noContent": "Nenhum turno com mensagens registradas.",
       "user.label": "Usuário",
       "user.agent": "Agente",
       "assistant.label": "Assistente",
@@ -395,6 +405,8 @@ window.__ModuleLoader__.load({
         white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 21px;
       }
       .visor-muted { color: var(--dsw-alias-label-secondary); font-size: 11.5px; }
+      .visor-omitted { margin-top: 4px; color: var(--dsw-alias-label-secondary); font-size: 11px; }
+      .visor-omitted summary { cursor: pointer; width: fit-content; }
       .visor-thinking { margin-top: 5px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
       .visor-thinking summary { cursor: pointer; width: fit-content; }
       .visor-thinking pre {
@@ -1258,6 +1270,13 @@ window.__ModuleLoader__.load({
       const lastSession = React.useRef(null);
       const turns = React.useMemo(() => groupItems(feed.items), [feed.items]);
       const meta = feed.meta;
+      const turnHasContent = (turn) => turn.items.some((item) =>
+        item.kind === "user" || item.kind === "assistant" || item.kind === "tool_call" || item.kind === "tool_result");
+      const keepEmptyTurn = (turn) => !turn.end
+        || turn.end.reasonKind === "interrupted"
+        || turn.end.reasonKind === "error";
+      const visibleTurns = turns.filter((turn) => turnHasContent(turn) || keepEmptyTurn(turn));
+      const omittedTurns = turns.filter((turn) => !turnHasContent(turn) && !keepEmptyTurn(turn));
 
       const scrollToEnd = React.useCallback((smooth) => {
         const node = scrollRef.current;
@@ -1338,6 +1357,23 @@ window.__ModuleLoader__.load({
         h("div", { className: "visor-timeline-wrap" },
           h("div", { className: "visor-timeline", ref: scrollRef, onScroll, role: "log", "aria-label": meta ? meta.title || meta.id : t("title") },
             h("div", { className: "visor-timeline-inner" },
+              omittedTurns.length > 0
+                ? h("div", { className: "visor-notice" },
+                  t("timeline.omittedEmpty", { count: omittedTurns.length }),
+                  h("details", { className: "visor-omitted" },
+                    h("summary", null, t("timeline.omittedEmptyDetails")),
+                    h("div", { className: "visor-muted" }, t("timeline.omittedEmptyHint")),
+                    omittedTurns.map((turn) => h("div", { key: turn.number, className: "visor-muted" },
+                      t("timeline.turnSummary", {
+                        number: turn.number,
+                        reason: turn.end?.reasonDetail
+                          ? `${turn.end.reasonKind} (${turn.end.reasonDetail})`
+                          : turn.end?.reasonKind ?? "?",
+                      }),
+                    )),
+                  ),
+                )
+                : null,
               showEmpty
                 ? h(EmptyPane, {
                   kind: emptyKind,
@@ -1345,13 +1381,21 @@ window.__ModuleLoader__.load({
                   t,
                   onRetry,
                 })
-                : turns.map((turn, index) => h(TurnBlock, {
+                : visibleTurns.map((turn, index) => h(TurnBlock, {
                   key: `${turn.number}-${index}`,
                   turn,
-                  isLast: index === turns.length - 1,
+                  isLast: index === visibleTurns.length - 1,
                   live: meta?.live === true,
                   t,
                 })),
+              !showEmpty && visibleTurns.length === 0
+                ? h("div", { className: "visor-empty", style: { padding: "24px 12px" } },
+                  h("p", null, t("timeline.noContent")))
+                : null,
+              omittedTurns.length > 0
+                ? h("div", { className: "visor-muted", style: { marginTop: 14 } },
+                  t("timeline.omittedEmpty", { count: omittedTurns.length }))
+                : null,
             ),
           ),
           !showEmpty && !atBottom

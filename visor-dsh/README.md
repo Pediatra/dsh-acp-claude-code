@@ -87,6 +87,12 @@ O caminho real é:
 ou fechada; se o ACP já estiver dono por uma ponte antiga/sem canal, a ação
 devolve o erro de lock e nada é forçado.
 
+Um cancelamento do ACP grava `turn/end` com `reason.kind = "aborted"` e
+`reason.reason.kind = "user"`; a UI mostra **“abortado (user)”**. Se o turno foi
+encerrado antes de o `user/message`/`assistant/message` ser gravado, ele fica
+vazio no log; a timeline omite esses turnos vazios e mostra uma nota. Nada foi
+apagado pelo visor.
+
 ### Estado nesta máquina
 
 O shim ACP anterior (sessão `576232c7…`, `acp_pid=122217`, `shim_pid=8620`)
@@ -202,6 +208,10 @@ temporário, mas não chama a API do modelo.
   `-` no nome são ambíguos nessa codificação.
 - O visor mostra eventos persistidos. Um evento que o writer ainda não
   materializou aparece na próxima leitura, não instantaneamente.
+- Turnos encerrados sem nenhuma mensagem registrada (por exemplo, cancelados
+  antes do `user/message`) são omitidos da timeline e resumidos numa nota no
+  topo/rodapé. O log continua completo; turnos com `interrupted` ou `error` são
+  sempre exibidos.
 - O controle só alcança um shim `dsh-acp` que tenha o socket (versão sincronizada
   deste repo). Uma sessão viva em um shim antigo, sem socket, não é cancelável
   pelo viewer; o shim precisa ser reiniciado/reconectado para carregar o canal.
