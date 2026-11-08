@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-visor-control
+      name: '@local/dsh-visor-control'

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Controles do visor de sessões",
+    "description": "Canal local de cancel/resume para sessões com dono ACP, usando o shim dsh-acp."
+  }
+}

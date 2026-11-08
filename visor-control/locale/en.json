@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session viewer controls",
+    "description": "Local cancel/resume channel for ACP-owned sessions, using the dsh-acp shim."
+  }
+}

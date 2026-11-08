@@ -1,0 +1,26 @@
+{
+  "name": "@local/dsh-visor-control",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Canal local de cancel/resume para o visor de sessões do DSH, sobre o shim dsh-acp.",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "lib/*.mjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

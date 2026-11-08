@@ -58,6 +58,23 @@ window.__ModuleLoader__.load({
       "feed.error": "Could not read this session.",
       "feed.loading": "Reading session…",
       "feed.retry": "Retry read",
+      "control.cancel": "Cancel turn",
+      "control.confirmCancel": "Confirm cancel",
+      "control.back": "Back",
+      "control.resume": "Resume",
+      "control.resumeSend": "Send resume",
+      "control.promptPlaceholder": "Message to resume, e.g. Continue from where you stopped",
+      "control.hint": "Cancel the live turn or send a follow-up through the dsh-acp control bridge.",
+      "control.unavailable": "Control bridge unavailable. Install/load @local/dsh-visor-control.",
+      "control.noLive": "No live turn in a controlled dsh-acp bridge.",
+      "control.ready": "Ready to resume a persisted session.",
+      "control.working": "Working…",
+      "control.cancelled": "Turn cancelled.",
+      "control.cancelRequested": "Cancellation requested; the agent has not stopped yet.",
+      "control.resumed": "Session resumed.",
+      "control.sent": "Message sent.",
+      "control.preview": "Partial output",
+      "control.error": "Control failed",
       "turn.pre": "Before the first turn",
       "turn.title": "Turn {number}",
       "turn.running": "running",
@@ -139,6 +156,23 @@ window.__ModuleLoader__.load({
       "feed.error": "Não foi possível ler esta sessão.",
       "feed.loading": "Lendo a sessão…",
       "feed.retry": "Tentar leitura de novo",
+      "control.cancel": "Cancelar turno",
+      "control.confirmCancel": "Confirmar cancelamento",
+      "control.back": "Voltar",
+      "control.resume": "Retomar",
+      "control.resumeSend": "Enviar retomada",
+      "control.promptPlaceholder": "Mensagem para retomar, ex.: Continue de onde parou",
+      "control.hint": "Cancele o turno vivo ou mande uma continuação pela ponte de controle dsh-acp.",
+      "control.unavailable": "Ponte de controle indisponível. Instale/carregue @local/dsh-visor-control.",
+      "control.noLive": "Nenhum turno vivo numa ponte dsh-acp controlada.",
+      "control.ready": "Pronto para retomar uma sessão persistida.",
+      "control.working": "Trabalhando…",
+      "control.cancelled": "Turno cancelado.",
+      "control.cancelRequested": "Cancelamento pedido; o agente ainda não parou.",
+      "control.resumed": "Sessão retomada.",
+      "control.sent": "Mensagem enviada.",
+      "control.preview": "Saída parcial",
+      "control.error": "Falha no controle",
       "turn.pre": "Antes do primeiro turno",
       "turn.title": "Turno {number}",
       "turn.running": "em andamento",
@@ -283,6 +317,41 @@ window.__ModuleLoader__.load({
       .visor-badge.is-owner { color: var(--dsw-alias-state-warn-primary); border-color: var(--dsw-alias-state-warn-primary); }
       .visor-badge.is-error { color: var(--dsw-alias-state-error-primary); border-color: var(--dsw-alias-state-error-primary); }
       .visor-badge.is-idle { color: var(--dsw-alias-state-idle-primary); border-color: var(--dsw-alias-state-idle-primary); }
+      .visor-control {
+        display: flex; flex-direction: column; gap: 6px;
+        margin-top: 8px; padding: 8px 10px; border-radius: 10px;
+        background: var(--dsw-alias-bg-layer-1);
+        border: 1px solid var(--dsw-alias-border-l1);
+      }
+      .visor-control-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+      .visor-control-hint { color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 17px; }
+      .visor-control-prompt { display: flex; flex: 1; min-width: 220px; gap: 6px; }
+      .visor-control-prompt input {
+        flex: 1; min-width: 0; height: 30px; padding: 0 9px;
+        color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base);
+        border: 1px solid var(--dsw-alias-border-l1); border-radius: 9px; outline: none;
+      }
+      .visor-control-prompt input:focus { border-color: var(--dsw-alias-brand-primary); }
+      .visor-control-message {
+        color: var(--dsw-alias-label-secondary); font-size: 11.5px; line-height: 18px;
+        overflow-wrap: anywhere;
+      }
+      .visor-control-message.is-error { color: var(--dsw-alias-state-error-primary); }
+      .visor-control-message.is-ok { color: var(--dsw-alias-state-success-primary); }
+      .visor-control-message pre {
+        margin: 4px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere;
+        background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 7px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; line-height: 16px;
+      }
+      .visor-button.is-danger {
+        color: var(--dsw-alias-state-error-primary);
+        border-color: var(--dsw-alias-state-error-primary);
+      }
+      .visor-button.is-primary {
+        color: var(--dsw-alias-brand-primary);
+        border-color: var(--dsw-alias-brand-primary);
+      }
       .visor-notice {
         margin: 8px 0 0; padding: 8px 11px; border-radius: 10px;
         color: var(--dsw-alias-label-secondary);
@@ -432,6 +501,35 @@ window.__ModuleLoader__.load({
         throw error;
       }
       return body ?? {};
+    }
+
+    /**
+     * @param {string} url
+     * @param {object} body
+     */
+    async function postJson(url, body) {
+      const response = await fetch(url, {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          "x-visor-control": "1",
+        },
+        body: JSON.stringify(body),
+      });
+      let data = null;
+      try {
+        data = await response.json();
+      } catch {
+        // resposta sem JSON
+      }
+      if (!response.ok) {
+        const error = new Error(data?.error ?? `HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      return data ?? {};
     }
 
     /**
@@ -1001,6 +1099,159 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function ControlBar({ meta, t }) {
+      const [status, setStatus] = React.useState({
+        available: false,
+        live: [],
+        shims: [],
+        error: null,
+        loading: true,
+      });
+      const [busy, setBusy] = React.useState(false);
+      const [confirm, setConfirm] = React.useState(false);
+      const [resumeOpen, setResumeOpen] = React.useState(false);
+      const [prompt, setPrompt] = React.useState("Continue de onde parou");
+      const [message, setMessage] = React.useState(null);
+
+      const refresh = React.useCallback(async (signal) => {
+        try {
+          const data = await fetchJson(`${API}/control`, signal);
+          setStatus({
+            available: data.available === true,
+            live: Array.isArray(data.live) ? data.live : [],
+            shims: Array.isArray(data.shims) ? data.shims : [],
+            error: null,
+            loading: false,
+          });
+        } catch (error) {
+          if (error?.name === "AbortError") return;
+          setStatus({
+            available: false,
+            live: [],
+            shims: [],
+            error: error?.message ? String(error.message) : String(error),
+            loading: false,
+          });
+        }
+      }, []);
+
+      React.useEffect(() => {
+        const controller = new AbortController();
+        refresh(controller.signal);
+        return () => controller.abort();
+      }, [refresh, meta?.id, meta?.ownerPids?.join(",")]);
+
+      const liveEntry = status.live.find((item) => item?.dsh_session_id === meta?.id);
+      const canCancel = status.available && liveEntry?.busy === true && !busy;
+      const canResume = status.available && !busy && liveEntry?.busy !== true;
+
+      const run = async (action, payload) => {
+        setBusy(true);
+        setMessage(null);
+        try {
+          const data = await postJson(`${API}/control`, { action, ...payload });
+          if (data?.ok === false) {
+            setMessage({ tone: "error", text: data.error || t("control.error") });
+          } else {
+            const result = data?.result ?? {};
+            const preview = result.output_preview || result.output || "";
+            let label = t("control.resumed");
+            if (action === "cancel") {
+              label = result.cancel_requested === true
+                ? (result.cancelled === true ? t("control.cancelled") : t("control.cancelRequested"))
+                : t("control.cancelled");
+            } else if (data.mode === "sent") {
+              label = t("control.sent");
+            }
+            setMessage({
+              tone: "ok",
+              text: label,
+              preview: typeof preview === "string" && preview.length > 0 ? preview.slice(0, 600) : null,
+            });
+          }
+        } catch (error) {
+          setMessage({ tone: "error", text: error?.message ? String(error.message) : String(error) });
+        } finally {
+          setBusy(false);
+          setConfirm(false);
+          setResumeOpen(false);
+          refresh();
+        }
+      };
+
+      const doCancel = () => run("cancel", { dsh_session_id: meta.id, wait_seconds: 30 });
+      const doResume = () => run("resume", {
+        dsh_session_id: meta.id,
+        cwd: meta.cwd,
+        prompt: prompt.trim() || "Continue de onde parou",
+      });
+
+      const statusText = status.loading
+        ? t("control.working")
+        : status.error
+          ? t("control.unavailable")
+          : !status.available
+            ? t("control.unavailable")
+            : status.shims.length === 0
+              ? t("control.ready")
+              : null;
+
+      return h("div", { className: "visor-control", "aria-label": t("control.hint") },
+        h("div", { className: "visor-control-row" },
+          h("button", {
+            type: "button",
+            className: "visor-button is-danger",
+            disabled: !canCancel,
+            title: canCancel ? t("control.cancel") : (statusText ?? t("control.noLive")),
+            onClick: () => {
+              if (confirm) doCancel();
+              else setConfirm(true);
+            },
+          }, busy ? t("control.working") : confirm ? t("control.confirmCancel") : t("control.cancel")),
+          confirm
+            ? h("button", { type: "button", className: "visor-button", onClick: () => setConfirm(false) }, t("control.back"))
+            : null,
+          h("button", {
+            type: "button",
+            className: "visor-button is-primary",
+            disabled: !canResume,
+            title: canResume ? t("control.resume") : (statusText ?? t("control.noLive")),
+            onClick: () => setResumeOpen((value) => !value),
+          }, t("control.resume")),
+          h("span", { className: "visor-control-hint" }, t("control.hint")),
+        ),
+        resumeOpen
+          ? h("div", { className: "visor-control-prompt" },
+            h("input", {
+              type: "text",
+              value: prompt,
+              placeholder: t("control.promptPlaceholder"),
+              "aria-label": t("control.promptPlaceholder"),
+              onChange: (event) => setPrompt(event.target.value),
+              onKeyDown: (event) => {
+                if (event.key === "Enter" && canResume) doResume();
+              },
+            }),
+            h("button", {
+              type: "button",
+              className: "visor-button is-primary",
+              disabled: !canResume || busy,
+              onClick: doResume,
+            }, t("control.resumeSend")),
+          )
+          : null,
+        statusText
+          ? h("div", { className: "visor-control-message" }, statusText)
+          : null,
+        message
+          ? h("div", { className: `visor-control-message ${message.tone === "error" ? "is-error" : "is-ok"}` },
+            message.text,
+            message.preview ? h("pre", null, message.preview) : null,
+          )
+          : null,
+      );
+    }
+
     function Timeline({ sessionId, feed, t, onRetry }) {
       const scrollRef = React.useRef(null);
       const [atBottom, setAtBottom] = React.useState(true);
@@ -1072,6 +1323,7 @@ window.__ModuleLoader__.load({
                 : null,
               meta.partialLine && meta.live ? h("span", null, t("status.partial")) : null,
             ),
+            h(ControlBar, { meta, t }),
             hasReadError
               ? h("div", { className: "visor-notice is-error" }, `${t("status.readError")}: ${meta.readError}`)
               : null,
