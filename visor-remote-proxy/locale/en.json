@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Tailscale Serve host bridge",
+    "description": "Loopback proxy that makes the dsh web accept requests coming from Tailscale Serve."
+  }
+}

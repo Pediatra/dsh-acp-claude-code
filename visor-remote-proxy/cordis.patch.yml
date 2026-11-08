@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-visor-remote-proxy
+      name: '@local/dsh-visor-remote-proxy'

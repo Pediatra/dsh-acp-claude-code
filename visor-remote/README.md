@@ -11,12 +11,21 @@ um segundo dispositivo sem reiniciar o web. A página é acessada no browser da
 LAN (já autenticado) e o link é copiado para o celular, que precisa estar com o
 Tailscale ligado.
 
+O Serve **não** aponta direto para 3080: o `dsh web` valida Host/Origin contra
+`--trusted-host` e rejeitaria o hostname do tailnet. O plugin
+[`visor-remote-proxy`](../visor-remote-proxy/README.md) escuta só em
+`127.0.0.1:3081`, reescreve Host/Origin/Referer para `192.168.2.164:3080` e
+encaminha HTTP e WebSocket.
+
 ## Uso
 
 1. Habilite **Tailscale Serve** no tailnet (aprovação no admin do Tailscale).
-2. No host: `tailscale serve --bg http://192.168.2.164:3080`.
-3. No browser da LAN: <http://192.168.2.164:3080/api/remote-url>.
-4. Copie o link e abra no celular com Tailscale ligado.
+2. Instale o plugin `@local/dsh-visor-remote-proxy` (proxy loopback
+   `127.0.0.1:3081`) no profile `web`; ele reescreve Host/Origin para a
+   autoridade LAN confiável.
+3. No host: `tailscale serve --bg http://127.0.0.1:3081`.
+4. No browser da LAN: <http://192.168.2.164:3080/api/remote-url>.
+5. Copie o link e abra no celular com Tailscale ligado.
 
 A página não é cacheada, não usa CDN e não registra o token. Ela é
 autenticada por `ctx.connection.requestRejection`; sem o cookie do browser ela

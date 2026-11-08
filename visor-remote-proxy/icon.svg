@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Ponte de host">
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="#334155"/>
+  <path d="M15 32h14M35 32h14" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+  <path d="M25 24l-8 8 8 8M39 24l8 8-8 8" fill="none" stroke="#93c5fd" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="32" cy="32" r="3" fill="#ffffff"/>
+</svg>

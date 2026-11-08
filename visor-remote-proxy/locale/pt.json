@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Ponte de Host do Tailscale Serve",
+    "description": "Proxy loopback que faz o dsh web aceitar as requisições vindas do Tailscale Serve."
+  }
+}
