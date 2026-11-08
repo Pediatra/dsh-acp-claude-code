@@ -10,8 +10,11 @@
  * internet.
  */
 import { execFileSync } from "node:child_process";
+import qrcode from "qrcode-generator";
 
 export const inject = ["webServer", "connection"];
+
+const PAGE_VERSION = "2";
 
 /**
  * @param {import("@deepseek-ai/cordis").Context} ctx
@@ -44,13 +47,17 @@ async function handle(req, res, ctx) {
       "content-type": "text/plain; charset=utf-8",
       "cache-control": "no-store",
       "content-length": String(Buffer.byteLength("Unauthorized")),
+      "x-visor-remote-version": PAGE_VERSION,
     });
     res.end("Unauthorized");
     return;
   }
 
   if (req.method !== "GET" && req.method !== "HEAD") {
-    res.writeHead(405, { allow: "GET, HEAD" });
+    res.writeHead(405, {
+      allow: "GET, HEAD",
+      "x-visor-remote-version": PAGE_VERSION,
+    });
     res.end("Method Not Allowed");
     return;
   }
@@ -60,7 +67,8 @@ async function handle(req, res, ctx) {
     const base = requestUrl.searchParams.get("base") || discoverBase();
     const safeBase = validateBase(base);
     const authenticated = ctx.connection.authenticatedUrl(safeBase);
-    const html = renderPage(safeBase, authenticated);
+    const qr = renderQr(authenticated);
+    const html = renderPage(authenticated, qr);
     const body = Buffer.from(html, "utf8");
     res.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
@@ -69,6 +77,7 @@ async function handle(req, res, ctx) {
       "x-content-type-options": "nosniff",
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
       "content-length": String(body.byteLength),
+      "x-visor-remote-version": PAGE_VERSION,
     });
     if (req.method === "HEAD") res.end();
     else res.end(body);
@@ -80,6 +89,7 @@ async function handle(req, res, ctx) {
       "content-type": "text/plain; charset=utf-8",
       "cache-control": "no-store",
       "content-length": String(body.byteLength),
+      "x-visor-remote-version": PAGE_VERSION,
     });
     res.end(body);
   }
@@ -126,11 +136,22 @@ function validateBase(raw) {
 }
 
 /**
- * @param {string} base
- * @param {string} authenticated
+ * @param {string} value
  * @returns {string}
  */
-function renderPage(base, authenticated) {
+function renderQr(value) {
+  const qr = qrcode(0, "M");
+  qr.addData(value);
+  qr.make();
+  return qr.createSvgTag({ cellSize: 5, margin: 3, scalable: true });
+}
+
+/**
+ * @param {string} authenticated
+ * @param {string} qr
+ * @returns {string}
+ */
+function renderPage(authenticated, qr) {
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -144,6 +165,8 @@ function renderPage(base, authenticated) {
   p { margin: .7rem 0; }
   .muted { opacity: .72; font-size: .9rem; }
   .warn { border-left: 3px solid #b45309; padding: .5rem .8rem; background: color-mix(in srgb, #b45309 10%, transparent); }
+  .qr { width: min(100%, 19rem); margin: .8rem 0; padding: .7rem; background: #fff; border-radius: 12px; }
+  .qr svg { display: block; width: 100%; height: auto; }
   textarea { box-sizing: border-box; width: 100%; min-height: 7.5rem; margin-top: .4rem; padding: .7rem; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
   a { overflow-wrap: anywhere; }
   button { margin-top: .5rem; padding: .45rem .8rem; font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid color-mix(in srgb, currentColor 35%, transparent); background: transparent; color: inherit; }
@@ -153,27 +176,42 @@ function renderPage(base, authenticated) {
 </head>
 <body>
 <h1>Abrir a GUI no celular</h1>
-<p class="muted">Base Tailscale: <code>${escapeHtml(base)}</code></p>
 <p>1. Ligue o <strong>Tailscale</strong> no celular.<br>
-2. Abra este link no navegador do celular:</p>
+2. Escaneie o QR abaixo com a câmera do celular; ele abre o link já autenticado no navegador:</p>
+<div class="qr" role="img" aria-label="QR code do link autenticado">${qr}</div>
+<p class="muted">Se o QR abrir dentro de um app (WhatsApp, Telegram etc.), use “Abrir no navegador” ou copie o link para o Chrome/Samsung Internet.</p>
+<p class="muted">Se preferir, abra ou copie o link autenticado:</p>
 <p><a id="link" href="${escapeAttribute(authenticated)}">${escapeHtml(authenticated)}</a></p>
 <p class="muted">Ou copie o link:</p>
 <textarea id="url" readonly>${escapeHtml(authenticated)}</textarea>
 <button id="copy" type="button">Copiar link</button>
+<p class="muted">A URL sem <code>?token=</code> não autentica sozinha; use o link acima.</p>
 <p class="warn">O link contém o token de launch deste processo do <code>dsh web</code>. Não compartilhe.
 Se o <code>dsh web</code> for reiniciado, o token muda: abra esta página de novo para gerar outro link.</p>
 <script>
   const copy = document.getElementById("copy");
   const field = document.getElementById("url");
   copy.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(field.value);
-      copy.textContent = "Copiado";
-      setTimeout(() => { copy.textContent = "Copiar link"; }, 1500);
-    } catch {
+    const value = field.value;
+    let copied = false;
+    if (window.isSecureContext && navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(value);
+        copied = true;
+      } catch {}
+    }
+    if (!copied) {
       field.focus();
       field.select();
+      if (typeof field.setSelectionRange === "function") field.setSelectionRange(0, value.length);
+      try {
+        copied = document.execCommand("copy");
+      } catch {
+        copied = false;
+      }
     }
+    copy.textContent = copied ? "Copiado" : "Selecione e copie";
+    setTimeout(() => { copy.textContent = "Copiar link"; }, 2500);
   });
 </script>
 </body>

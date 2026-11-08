@@ -25,12 +25,17 @@ encaminha HTTP e WebSocket.
    autoridade LAN confiável.
 3. No host: `tailscale serve --bg http://127.0.0.1:3081`.
 4. No browser da LAN: <http://192.168.2.164:3080/api/remote-url>.
-5. Copie o link e abra no celular com Tailscale ligado.
+5. Escaneie o QR com a câmera do celular (abre o link autenticado direto no
+   navegador) ou copie o link para o Chrome/Samsung Internet. O celular precisa
+   estar com o Tailscale ligado.
 
-A página não é cacheada, não usa CDN e não registra o token. Ela é
-autenticada por `ctx.connection.requestRejection`; sem o cookie do browser ela
-responde 401. O link contém um token de processo: não compartilhe; se o
-`dsh web` reiniciar, gere outro.
+A página não é cacheada, não usa CDN e não registra o token. O QR é gerado no
+Host (`qrcode-generator`) e embutido como SVG inline; nada é enviado a
+terceiros. Ela é autenticada por `ctx.connection.requestRejection`; sem o
+cookie do browser ela responde 401. O botão de copiar tem fallback para
+`document.execCommand("copy")`, porque a Clipboard API não existe em HTTP na
+LAN. O link contém um token de processo: não compartilhe; se o `dsh web`
+reiniciar, gere outro.
 
 ## Teste
 
