@@ -126,3 +126,44 @@ test("reescreve Host/Origin/Referer e encaminha HTTP e WebSocket", async () => {
     await closeServer(upstream);
   }
 });
+
+test("relaxa o cookie de auth para SameSite=Lax e Secure", async () => {
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(303, {
+      location: "./",
+      "set-cookie": [
+        "dsh-auth-abc=v1.payload.sig; Max-Age=3600; Path=/; HttpOnly; SameSite=Strict",
+        "other=1; Path=/; SameSite=Strict",
+      ],
+    });
+    res.end();
+  });
+  const upstreamPort = await listen(upstream);
+
+  const proxy = createProxyServer({
+    upstreamHost: "127.0.0.1",
+    upstreamPort,
+    upstreamAuthority: "192.168.2.164:3080",
+    upstreamOrigin: "http://192.168.2.164:3080",
+  });
+  const proxyPort = await listen(proxy);
+
+  try {
+    const response = await get(proxyPort, "/?token=fake", {
+      Host: "bazzite.example.ts.net",
+    });
+    assert.equal(response.status, 303);
+    const cookies = response.headers["set-cookie"];
+    assert.ok(Array.isArray(cookies));
+    assert.equal(cookies.length, 2);
+    assert.match(cookies[0], /SameSite=Lax/);
+    assert.match(cookies[0], /;\s*Secure/);
+    assert.doesNotMatch(cookies[0], /SameSite=Strict/);
+    assert.match(cookies[0], /dsh-auth-abc=v1\.payload\.sig/);
+    assert.match(cookies[1], /SameSite=Strict/);
+    assert.doesNotMatch(cookies[1], /;\s*Secure/);
+  } finally {
+    await closeServer(proxy);
+    await closeServer(upstream);
+  }
+});

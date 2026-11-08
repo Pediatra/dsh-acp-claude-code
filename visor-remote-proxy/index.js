@@ -9,7 +9,9 @@
  * para 192.168.2.164:3080.
  *
  * Não expõe porta na LAN/internet e não adiciona autenticação própria: o
- * cookie/token do dsh web continuam valendo.
+ * cookie/token do dsh web continuam valendo. Ajusta apenas o cookie
+ * `dsh-auth-*` de `SameSite=Strict` para `SameSite=Lax; Secure`, para que o
+ * browser o envie no redirect de uma navegação cross-site (QR/câmera).
  */
 import http from "node:http";
 import net from "node:net";
@@ -43,7 +45,9 @@ export function createProxyServer(options = {}) {
       path: req.url,
       headers,
     }, (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+      const responseHeaders = { ...upstreamRes.headers };
+      relaxAuthCookies(responseHeaders);
+      res.writeHead(upstreamRes.statusCode ?? 502, responseHeaders);
       upstreamRes.pipe(res);
     });
     upstream.on("error", (error) => {
@@ -83,6 +87,30 @@ export function createProxyServer(options = {}) {
   });
 
   return server;
+}
+
+/**
+ * O `dsh web` vê HTTP (o Serve termina TLS) e emite o cookie de sessão com
+ * `SameSite=Strict` e sem `Secure`. Numa navegação cross-site (QR/câmera ou
+ * link vindo de outro app), o Chrome define o cookie mas não o envia no 303
+ * de `/?token=...` para `/`, resultando em 401. Para o browser que fala HTTPS
+ * com o Serve, relaxamos só o cookie de auth para `SameSite=Lax` e marcamos
+ * `Secure`; o token continua obrigatório para emitir o cookie, e Lax ainda
+ * bloqueia POST cross-site.
+ *
+ * @param {import("node:http").IncomingHttpHeaders} headers
+ */
+function relaxAuthCookies(headers) {
+  const value = headers["set-cookie"];
+  if (value === undefined) return;
+  const cookies = Array.isArray(value) ? value : [value];
+  headers["set-cookie"] = cookies.map((cookie) => {
+    if (!/^\s*dsh-auth-/iu.test(cookie)) return cookie;
+    let rewritten = cookie.replace(/;\s*SameSite=Strict/iu, "; SameSite=Lax");
+    if (!/;\s*SameSite=/iu.test(rewritten)) rewritten += "; SameSite=Lax";
+    if (!/;\s*Secure\b/iu.test(rewritten)) rewritten += "; Secure";
+    return rewritten;
+  });
 }
 
 /**
