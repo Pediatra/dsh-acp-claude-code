@@ -8,8 +8,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
+import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,6 +76,9 @@ const STATE_DIR = path.resolve(
   process.env.DSH_ACP_STATE_DIR || path.join(os.homedir(), ".local", "state", "dsh-acp-mcp"),
 );
 const STATE_SESSIONS_DIR = path.join(STATE_DIR, "sessions");
+const CONTROL_DIR = path.join(STATE_DIR, "control");
+const CONTROL_SOCKET = path.join(CONTROL_DIR, `shim-${process.pid}.sock`);
+const CONTROL_REGISTRY = path.join(CONTROL_DIR, `shim-${process.pid}.json`);
 
 const safeStateId = (id) => {
   if (!/^[A-Za-z0-9._-]+$/.test(String(id))) throw new Error(`invalid session id for state: ${id}`);
@@ -92,6 +96,7 @@ function writeJsonAtomic(file, value) {
 
 try {
   mkdirSync(STATE_SESSIONS_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(CONTROL_DIR, { recursive: true, mode: 0o700 });
 } catch (err) {
   log("state dir unavailable:", err.message);
 }
@@ -1609,6 +1614,134 @@ async function callTool(name, args, progressToken) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Local control socket (viewer read-only + cancel/resume)            */
+/* ------------------------------------------------------------------ */
+
+let controlServer = null;
+
+function controlLiveSessions() {
+  return [...sessions.values()].map((s) => ({
+    session_id: s.id,
+    dsh_session_id: s.sessionId,
+    busy: s.busy,
+    status: s.status,
+    cwd: s.cwd,
+    mode: s.mode,
+  }));
+}
+
+function findControlSession(args) {
+  const dsh = String(args.dsh_session_id || "").trim();
+  if (dsh) {
+    for (const s of sessions.values()) {
+      if (s.sessionId === dsh) return s;
+    }
+  }
+  const alias = String(args.session_id || "").trim();
+  if (alias) return sessions.get(alias);
+  return undefined;
+}
+
+async function handleControlRequest(request) {
+  const action = String(request?.action || "").trim();
+  if (action === "list" || action === "status") {
+    return { ok: true, result: { pid: process.pid, workspace: WORKSPACE, sessions: controlLiveSessions() } };
+  }
+  if (action === "cancel") {
+    const s = findControlSession(request);
+    if (!s) return { ok: false, code: "not-live", error: "sessão não está viva neste shim" };
+    const result = await toolCancel({ session_id: s.id, wait_seconds: request.wait_seconds }, undefined);
+    return { ok: true, result };
+  }
+  if (action === "resume") {
+    const dshSessionId = String(request?.dsh_session_id || "").trim();
+    if (!dshSessionId) return { ok: false, code: "bad-request", error: "dsh_session_id é obrigatório" };
+    const prompt = String(request?.prompt || "").trim();
+    if (!prompt) return { ok: false, code: "bad-request", error: "prompt é obrigatório" };
+    const live = findControlSession({ dsh_session_id: dshSessionId });
+    if (live) {
+      if (live.busy) {
+        return {
+          ok: false,
+          code: "busy",
+          error: "turno em andamento; cancele antes de retomar",
+          result: live.statusPayload(),
+        };
+      }
+      live.prompt(prompt);
+      return { ok: true, mode: "sent", result: live.statusPayload() };
+    }
+    const result = await toolResume({
+      dsh_session_id: dshSessionId,
+      prompt,
+      cwd: request.cwd,
+      mode: request.mode,
+      wait: false,
+    }, undefined);
+    return { ok: true, mode: "resumed", result };
+  }
+  return { ok: false, code: "unknown-action", error: `acao desconhecida: ${action}` };
+}
+
+function startControlServer() {
+  if (process.env.DSH_ACP_CONTROL === "0") return;
+  try {
+    if (existsSync(CONTROL_SOCKET)) unlinkSync(CONTROL_SOCKET);
+    controlServer = createServer((socket) => {
+      socket.setEncoding("utf8");
+      let buffer = "";
+      socket.on("data", (chunk) => {
+        buffer += chunk;
+        let index;
+        while ((index = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, index).trim();
+          buffer = buffer.slice(index + 1);
+          if (!line) continue;
+          let request;
+          try {
+            request = JSON.parse(line);
+          } catch {
+            socket.write(JSON.stringify({ ok: false, error: "json invalido" }) + "\n");
+            continue;
+          }
+          handleControlRequest(request)
+            .then((response) => socket.write(JSON.stringify({ id: request.id, ...response }) + "\n"))
+            .catch((err) => socket.write(JSON.stringify({
+              id: request.id,
+              ok: false,
+              error: String(err?.message || err).slice(0, 500),
+            }) + "\n"));
+        }
+      });
+    });
+    controlServer.listen(CONTROL_SOCKET, () => {
+      try { chmodSync(CONTROL_SOCKET, 0o600); } catch {}
+      try {
+        writeJsonAtomic(CONTROL_REGISTRY, {
+          pid: process.pid,
+          socket: CONTROL_SOCKET,
+          workspace: WORKSPACE,
+          started_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log("control registry write failed:", err.message);
+      }
+      log("control socket ready:", CONTROL_SOCKET);
+    });
+    controlServer.on("error", (err) => log("control socket error:", err.message));
+  } catch (err) {
+    log("control socket start failed:", err.message);
+  }
+}
+
+function stopControlServer() {
+  try { controlServer?.close(); } catch {}
+  controlServer = null;
+  try { if (existsSync(CONTROL_SOCKET)) unlinkSync(CONTROL_SOCKET); } catch {}
+  try { if (existsSync(CONTROL_REGISTRY)) unlinkSync(CONTROL_REGISTRY); } catch {}
+}
+
 /* MCP framing: newline-delimited JSON (MCP stdio transport) */
 
 function mcpSend(msg) {
@@ -1670,6 +1803,7 @@ function handleMcp(msg) {
     return;
   }
   if (method === "shutdown") {
+    stopControlServer();
     Promise.allSettled([...sessions.values()].map((s) => s.close())).finally(() => {
       mcpSend({ jsonrpc: "2.0", id, result: {} });
       process.exit(0);
@@ -1677,6 +1811,7 @@ function handleMcp(msg) {
     return;
   }
   if (method === "exit") {
+    stopControlServer();
     process.exit(0);
   }
   if (id !== undefined) {
@@ -1685,6 +1820,7 @@ function handleMcp(msg) {
 }
 
 process.on("SIGTERM", async () => {
+  stopControlServer();
   await Promise.allSettled([...sessions.values()].map((s) => s.close()));
   process.exit(0);
 });
@@ -1695,5 +1831,21 @@ process.on("SIGTERM", async () => {
 process.on("SIGINT", () => {
   log("SIGINT ignored; live sessions stay up until SIGTERM");
 });
+
+startControlServer();
+
+// Um shim iniciado pelo viewer é filho do processo do dsh web. Se esse pai
+// morrer, o shim não deve continuar segurando sessões/lock órfãos.
+const parentPid = process.ppid;
+const parentWatch = setInterval(() => {
+  try {
+    process.kill(parentPid, 0);
+  } catch {
+    log("parent process is gone; closing control shim");
+    stopControlServer();
+    Promise.allSettled([...sessions.values()].map((s) => s.close())).finally(() => process.exit(0));
+  }
+}, 5_000);
+parentWatch.unref?.();
 
 log("ready; workspace=" + WORKSPACE);

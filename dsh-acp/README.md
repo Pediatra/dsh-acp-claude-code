@@ -45,6 +45,29 @@ O shim grava `~/.local/state/dsh-acp-mcp/sessions/<uuid>.json` e `.out.txt` a
 cada transição; `dsh-wait` usa `fs.watch` (sem polling) e imprime o JSON com o
 resultado quando o turno termina. Use o Bash `run_in_background` do Claude.
 
+## Canal de controle local (viewer)
+
+Além do MCP stdio do Claude, o shim publica um Unix socket local para o
+[visor-dsh](../visor-dsh/README.md):
+
+```text
+~/.local/state/dsh-acp-mcp/control/shim-<pid>.sock   (0600)
+~/.local/state/dsh-acp-mcp/control/shim-<pid>.json   (0600)
+```
+
+O protocolo é JSONL (`{id, action, ...}` → `{id, ok, result|error}`) e as ações
+são as mesmas funções das tools:
+
+- `cancel` → lógica de `deepseek_cancel` (`session/cancel` e saída parcial).
+- `resume` → `deepseek_send` se a sessão está viva e idle; `deepseek_resume` se
+  está fechada (novo processo ACP).
+- `list`/`status` → sessões vivas neste shim.
+
+O socket fica em diretório `0700` e é `0600`; não é HTTP e não é exposto na rede.
+O plugin `@local/dsh-visor-control` descobre os shims e oferece os botões no
+viewer. O shim também monitora o processo pai a cada 5 s e se encerra se ele
+morrer, para não deixar ACP/lock órfãos.
+
 ## Perfil, log e verificação
 
 `profile` é aplicado a `deepseek_start`, `deepseek_start_many[*]` e
