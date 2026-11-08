@@ -21,6 +21,10 @@ window.__ModuleLoader__.load({
       "list.empty": "No sessions found.",
       "list.emptyHint": "The viewer looks for <DSH_HOME>/sessions/*/*/.",
       "list.error": "Could not list sessions.",
+      "filter.acpOnly": "Only external owner: dsh acp",
+      "filter.showAll": "Show all sessions",
+      "filter.emptyAcp": "No session with external owner dsh acp right now.",
+      "filter.emptyAcpHint": "The ACP bridge may be starting or between turns. Show all to browse the persisted sessions.",
       "list.noLog": "no log yet",
       "list.owner": "owner {pid}",
       "list.live": "live",
@@ -98,6 +102,10 @@ window.__ModuleLoader__.load({
       "list.empty": "Nenhuma sessão encontrada.",
       "list.emptyHint": "O visor procura em <DSH_HOME>/sessions/*/*/.",
       "list.error": "Não foi possível listar as sessões.",
+      "filter.acpOnly": "Só dono externo: dsh acp",
+      "filter.showAll": "Mostrar todas as sessões",
+      "filter.emptyAcp": "Nenhuma sessão com dono externo dsh acp agora.",
+      "filter.emptyAcpHint": "A ponte ACP pode estar iniciando ou entre turnos. Mostre todas para navegar pelas sessões persistidas.",
       "list.noLog": "sem log ainda",
       "list.owner": "dono {pid}",
       "list.live": "ao vivo",
@@ -192,7 +200,13 @@ window.__ModuleLoader__.load({
       .visor-side-head { padding: 20px 16px 12px; }
       .visor-side-head h1 { margin: 0; font-size: 16px; font-weight: 600; line-height: 24px; }
       .visor-side-head p { margin: 4px 0 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; }
-      .visor-side-tools { display: flex; gap: 8px; align-items: center; padding: 0 16px 12px; }
+      .visor-side-tools { display: flex; gap: 8px; align-items: center; padding: 0 16px 10px; }
+      .visor-filter-row {
+        display: flex; align-items: center; gap: 8px;
+        padding: 0 16px 10px; color: var(--dsw-alias-label-secondary); font-size: 11.5px; line-height: 17px;
+      }
+      .visor-filter-row label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+      .visor-filter-row input { width: 13px; height: 13px; margin: 0; accent-color: var(--dsw-alias-brand-primary); }
       .visor-search {
         flex: 1; min-width: 0; height: 32px; padding: 0 10px;
         color: var(--dsw-alias-label-primary);
@@ -574,6 +588,16 @@ window.__ModuleLoader__.load({
      * @param {object[]|null|undefined} owner
      * @param {number|null|undefined} hostPid
      */
+    /** Sessão cujo lock está com um processo ACP externo (outro processo). */
+    function isExternalAcpOwner(session, hostPid) {
+      if (!Array.isArray(session.owner)) return false;
+      return session.owner.some((item) =>
+        item !== null && typeof item === "object"
+        && item.label === "dsh acp"
+        && item.pid !== hostPid,
+      );
+    }
+
     function ownerSummary(owner, hostPid) {
       if (!Array.isArray(owner) || owner.length === 0) return null;
       const external = owner.filter((item) => item.pid !== hostPid);
@@ -1098,24 +1122,30 @@ window.__ModuleLoader__.load({
       });
       const [query, setQuery] = React.useState("");
       const [feedReload, setFeedReload] = React.useState(0);
+      const [acpOnly, setAcpOnly] = React.useState(true);
+
+      const acpFiltered = React.useMemo(
+        () => sessionsState.sessions.filter((session) => isExternalAcpOwner(session, sessionsState.hostPid)),
+        [sessionsState.sessions, sessionsState.hostPid],
+      );
+      const eligible = acpOnly ? acpFiltered : sessionsState.sessions;
 
       React.useEffect(() => {
-        const sessions = sessionsState.sessions;
         if (sessionsState.status !== "ready") return;
-        if (sessions.length === 0) {
+        if (eligible.length === 0) {
           if (selectedId !== null) setSelectedId(null);
           return;
         }
-        if (selectedId !== null && sessions.some((session) => session.id === selectedId)) return;
+        if (selectedId !== null && eligible.some((session) => session.id === selectedId)) return;
         let stored = null;
         try {
           stored = window.sessionStorage.getItem(SELECTED_KEY);
         } catch {
           // sessionStorage indisponível
         }
-        const next = sessions.find((session) => session.id === stored) ?? sessions[0];
+        const next = eligible.find((session) => session.id === stored) ?? eligible[0];
         setSelectedId(next.id);
-      }, [sessionsState.sessions, sessionsState.status, selectedId]);
+      }, [eligible, sessionsState.status, selectedId]);
 
       React.useEffect(() => {
         if (selectedId === null) return;
@@ -1129,13 +1159,14 @@ window.__ModuleLoader__.load({
       const feed = useFeed(selectedId, feedReload);
       const filtered = React.useMemo(() => {
         const needle = query.trim().toLowerCase();
-        if (needle.length === 0) return sessionsState.sessions;
-        return sessionsState.sessions.filter((session) =>
+        if (needle.length === 0) return eligible;
+        return eligible.filter((session) =>
           [session.id, session.cwd, session.dirName, session.title]
             .filter((value) => typeof value === "string")
             .some((value) => value.toLowerCase().includes(needle)),
         );
-      }, [query, sessionsState.sessions]);
+      }, [query, eligible]);
+      const noAcpMatches = acpOnly && acpFiltered.length === 0 && sessionsState.sessions.length > 0;
 
       const retrySessions = React.useCallback(() => {
         refreshSessions(new AbortController().signal);
@@ -1169,6 +1200,16 @@ window.__ModuleLoader__.load({
                 title: t("list.refresh"),
               }, t("list.refresh")),
             ),
+            h("div", { className: "visor-filter-row" },
+              h("label", null,
+                h("input", {
+                  type: "checkbox",
+                  checked: acpOnly,
+                  onChange: (event) => setAcpOnly(event.target.checked),
+                }),
+                h("span", null, t("filter.acpOnly")),
+              ),
+            ),
             h("div", { className: "visor-side-count" },
               sessionsState.status === "loading"
                 ? t("list.loading")
@@ -1183,11 +1224,21 @@ window.__ModuleLoader__.load({
                 )
                 : null,
               filtered.length === 0 && sessionsState.status !== "loading"
-                ? h("div", { className: "visor-empty", style: { padding: "28px 14px" } },
-                  h("h3", null, t("list.empty")),
-                  h("p", null, t("list.emptyHint")),
-                  sessionsState.root ? h("p", { className: "visor-mono" }, sessionsState.root) : null,
-                )
+                ? noAcpMatches
+                  ? h("div", { className: "visor-empty", style: { padding: "28px 14px" } },
+                    h("h3", null, t("filter.emptyAcp")),
+                    h("p", null, t("filter.emptyAcpHint")),
+                    h("button", {
+                      type: "button",
+                      className: "visor-button",
+                      onClick: () => setAcpOnly(false),
+                    }, t("filter.showAll")),
+                  )
+                  : h("div", { className: "visor-empty", style: { padding: "28px 14px" } },
+                    h("h3", null, t("list.empty")),
+                    h("p", null, t("list.emptyHint")),
+                    sessionsState.root ? h("p", { className: "visor-mono" }, sessionsState.root) : null,
+                  )
                 : null,
               filtered.map((session) => h(SessionRow, {
                 key: session.id,
