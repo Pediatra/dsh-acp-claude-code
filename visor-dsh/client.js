@@ -232,6 +232,7 @@ window.__ModuleLoader__.load({
       .visor-root *, .visor-root *::before, .visor-root *::after { box-sizing: border-box; }
       .visor-root button, .visor-root input { font: inherit; }
       .visor-root :focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+      .visor-side-toggle { display: none; }
       .visor-side {
         display: flex;
         flex: 0 0 326px;
@@ -312,10 +313,12 @@ window.__ModuleLoader__.load({
         display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
         margin-top: 2px; color: var(--dsw-alias-label-secondary); font-size: 11.5px; line-height: 18px;
       }
+      .visor-subline > span { min-width: 0; overflow-wrap: anywhere; }
       .visor-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       .visor-badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
       .visor-badge {
         display: inline-flex; align-items: center; gap: 6px;
+        max-width: 100%; overflow: hidden; text-overflow: ellipsis;
         padding: 2px 8px; border-radius: 999px;
         color: var(--dsw-alias-label-secondary);
         background: var(--dsw-alias-bg-layer-1);
@@ -334,7 +337,7 @@ window.__ModuleLoader__.load({
         border: 1px solid var(--dsw-alias-border-l1);
       }
       .visor-control-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
-      .visor-control-hint { color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 17px; }
+      .visor-control-hint { color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 17px; overflow-wrap: anywhere; }
       .visor-control-prompt { display: flex; flex: 1; min-width: 220px; gap: 6px; }
       .visor-control-prompt input {
         flex: 1; min-width: 0; height: 30px; padding: 0 9px;
@@ -367,7 +370,7 @@ window.__ModuleLoader__.load({
         color: var(--dsw-alias-label-secondary);
         background: var(--dsw-alias-bg-layer-1);
         border: 1px solid var(--dsw-alias-border-l1);
-        font-size: 12px; line-height: 19px;
+        font-size: 12px; line-height: 19px; overflow-wrap: anywhere;
       }
       .visor-notice.is-warn { color: var(--dsw-alias-state-warn-primary); border-color: var(--dsw-alias-state-warn-primary); }
       .visor-notice.is-error { color: var(--dsw-alias-state-error-primary); border-color: var(--dsw-alias-state-error-primary); }
@@ -427,7 +430,8 @@ window.__ModuleLoader__.load({
       .visor-tool summary::-webkit-details-marker { display: none; }
       .visor-tool[open] summary { border-bottom: 1px solid var(--dsw-alias-border-l1); }
       .visor-tool-name {
-        flex: none; padding: 1px 6px; border-radius: 6px;
+        flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        padding: 1px 6px; border-radius: 6px;
         color: var(--dsw-alias-brand-primary); background: var(--dsw-alias-bg-layer-2);
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; font-weight: 600;
       }
@@ -451,7 +455,7 @@ window.__ModuleLoader__.load({
       .visor-turn-end {
         margin: 9px 0 0; padding: 7px 11px; border-radius: 9px;
         color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-1);
-        border: 1px solid var(--dsw-alias-border-l1); font-size: 12px; line-height: 19px;
+        border: 1px solid var(--dsw-alias-border-l1); font-size: 12px; line-height: 19px; overflow-wrap: anywhere;
       }
       .visor-turn-end strong { font-weight: 600; }
       .visor-turn-end.is-interrupted, .visor-turn-end.is-aborted {
@@ -482,8 +486,23 @@ window.__ModuleLoader__.load({
       @keyframes visor-spin { to { transform: rotate(360deg); } }
       @media (max-width: 860px) {
         .visor-root { flex-direction: column; }
-        .visor-side { flex: 0 0 auto; max-height: 38%; border-right: 0; border-bottom: 1px solid var(--dsw-alias-border-l1); }
-        .visor-header { padding: 14px 16px 10px; }
+        .visor-root:not(.is-side-open) .visor-side { display: none; }
+        .visor-side-toggle { display: inline-flex; width: 30px; min-width: 30px; padding: 0; }
+        .visor-side {
+          flex: 0 0 auto;
+          max-height: min(34%, 260px);
+          border-right: 0;
+          border-bottom: 1px solid var(--dsw-alias-border-l1);
+        }
+        .visor-side-head { padding: 12px 16px 8px; }
+        .visor-side-head h1 { font-size: 15px; line-height: 22px; }
+        .visor-side-head p { display: none; }
+        .visor-header { padding: 12px 16px 10px; }
+        .visor-header-top { flex-direction: column; align-items: stretch; gap: 8px; }
+        .visor-title-block { flex: 0 0 auto; width: 100%; }
+        .visor-badges { width: 100%; }
+        .visor-subline { overflow-wrap: anywhere; }
+        .visor-subline > span { min-width: 0; overflow-wrap: anywhere; }
         .visor-timeline { padding: 12px 16px 80px; }
       }
       @media (prefers-reduced-motion: reduce) {
@@ -1264,7 +1283,7 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function Timeline({ sessionId, feed, t, onRetry }) {
+    function Timeline({ sessionId, feed, t, onRetry, sideOpen = false, onToggleSide = () => {} }) {
       const scrollRef = React.useRef(null);
       const [atBottom, setAtBottom] = React.useState(true);
       const lastSession = React.useRef(null);
@@ -1327,6 +1346,21 @@ window.__ModuleLoader__.load({
                 ),
               ),
               h("div", { className: "visor-badges" },
+                h("button", {
+                  type: "button",
+                  className: "visor-button is-quiet visor-side-toggle",
+                  onClick: onToggleSide,
+                  "aria-label": t("list.title"),
+                  "aria-expanded": sideOpen,
+                  "aria-controls": "visor-session-list",
+                  title: t("list.title"),
+                },
+                h("svg", {
+                  width: 16, height: 16, viewBox: "0 0 24 24",
+                  fill: "none", stroke: "currentColor", strokeWidth: 1.8,
+                  strokeLinecap: "round", "aria-hidden": true, focusable: "false",
+                  style: { display: "block" },
+                }, h("path", { d: "M4 6h16M4 12h16M4 18h16" }))),
                 h(LiveBadge, { live: meta.live, t }),
                 h(OwnerBadge, { meta, t }),
                 meta.truncated ? h(Badge, { tone: "owner" }, t("status.truncated")) : null,
@@ -1419,6 +1453,7 @@ window.__ModuleLoader__.load({
       const [query, setQuery] = React.useState("");
       const [feedReload, setFeedReload] = React.useState(0);
       const [acpOnly, setAcpOnly] = React.useState(true);
+      const [sideOpen, setSideOpen] = React.useState(() => selectedId === null);
 
       const acpFiltered = React.useMemo(
         () => sessionsState.sessions.filter((session) => isExternalAcpOwner(session, sessionsState.hostPid)),
@@ -1452,6 +1487,10 @@ window.__ModuleLoader__.load({
         }
       }, [selectedId]);
 
+      React.useEffect(() => {
+        setSideOpen(selectedId === null);
+      }, [selectedId]);
+
       const feed = useFeed(selectedId, feedReload);
       const filtered = React.useMemo(() => {
         const needle = query.trim().toLowerCase();
@@ -1474,8 +1513,8 @@ window.__ModuleLoader__.load({
 
       return h(React.Fragment, null,
         h("style", null, css),
-        h("div", { className: "visor-root" },
-          h("aside", { className: "visor-side", "aria-label": t("list.title") },
+        h("div", { className: `visor-root${sideOpen ? " is-side-open" : ""}` },
+          h("aside", { id: "visor-session-list", className: "visor-side", "aria-label": t("list.title") },
             h("div", { className: "visor-side-head" },
               h("h1", null, t("title")),
               h("p", null, t("subtitle")),
@@ -1543,12 +1582,20 @@ window.__ModuleLoader__.load({
                 onSelect: (id) => {
                   setSelectedId(id);
                   setQuery("");
+                  setSideOpen(false);
                 },
                 t,
               })),
             ),
           ),
-          h(Timeline, { sessionId: selectedId, feed, t, onRetry: retryFeed }),
+          h(Timeline, {
+            sessionId: selectedId,
+            feed,
+            t,
+            onRetry: retryFeed,
+            sideOpen,
+            onToggleSide: () => setSideOpen((value) => !value),
+          }),
         ),
       );
     }

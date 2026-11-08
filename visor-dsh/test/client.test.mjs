@@ -9,6 +9,14 @@ import vm from "node:vm";
 
 test("client.js registra main e sidebar.panellist no locale visor-dsh", async () => {
   const code = await fs.readFile(new URL("../client.js", import.meta.url), "utf8");
+  // Regressão do layout mobile: o header não pode espremer o título ao lado
+  // dos badges em 390px; a lista vira uma faixa e o título ocupa a linha toda.
+  assert.match(code, /\.visor-header-top\s*\{\s*flex-direction:\s*column/u);
+  assert.match(code, /\.visor-title-block\s*\{\s*flex:\s*0 0 auto;\s*width:\s*100%/u);
+  assert.match(code, /max-height:\s*min\(34%,\s*260px\)/u);
+  assert.match(code, /\.visor-subline > span\s*\{\s*min-width:\s*0;\s*overflow-wrap:\s*anywhere/u);
+  assert.match(code, /\.visor-root:not\(\.is-side-open\) \.visor-side\s*\{\s*display:\s*none/u);
+  assert.match(code, /\.visor-side-toggle\s*\{\s*display:\s*inline-flex/u);
   let moduleDefinition;
   const sandbox = {
     window: {
