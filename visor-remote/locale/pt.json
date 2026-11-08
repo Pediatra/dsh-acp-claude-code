@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Link de acesso no celular",
+    "description": "Página autenticada que gera o link Tailscale Serve da GUI para o celular."
+  }
+}

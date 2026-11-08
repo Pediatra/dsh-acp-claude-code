@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Mobile access link",
+    "description": "Authenticated page that generates a Tailscale Serve launch link for the web GUI."
+  }
+}
