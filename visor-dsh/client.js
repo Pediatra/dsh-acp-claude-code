@@ -2,7 +2,12 @@ window.__ModuleLoader__.load({
   id: "@local/dsh-visor",
   factory(require) {
     const React = require("react");
-    const { MarkdownText } = require("@deepseek-ai/dsh-client-ui-primitives");
+    const {
+      MarkdownText,
+      useClipboardCopy,
+      IconCopyOutlineRegular,
+      IconCheckOutlineRegular,
+    } = require("@deepseek-ai/dsh-client-ui-primitives");
     const h = React.createElement;
 
     const NS = "visor-dsh";
@@ -414,6 +419,16 @@ window.__ModuleLoader__.load({
         display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
         margin-bottom: 2px; color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 17px;
       }
+      .visor-copy-button {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 24px; height: 24px; align-self: center; padding: 0;
+        color: var(--dsw-alias-label-secondary); background: transparent;
+        border: 1px solid transparent; border-radius: 6px; cursor: pointer;
+      }
+      .visor-copy-button:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+      .visor-copy-button:active { transform: translateY(1px); }
+      .visor-copy-button svg { display: block; }
+      .visor-message-actions { display: flex; justify-content: flex-end; margin-top: 2px; }
       .visor-user-bubble {
         padding: 8px 11px; border-radius: 10px;
         background: var(--dsw-alias-bg-layer-1);
@@ -1031,6 +1046,7 @@ window.__ModuleLoader__.load({
     }
 
     function AssistantMessage({ item, t }) {
+      const { copied, onCopy } = useClipboardCopy(item.text);
       return h("div", { className: "visor-message visor-item" },
         h("div", { className: "visor-avatar", "aria-hidden": "true" }, "A"),
         h("div", { className: "visor-message-body" },
@@ -1056,6 +1072,16 @@ window.__ModuleLoader__.load({
             : null,
           item.textTruncated
             ? h("div", { className: "visor-muted" }, `… (${item.textLength})`)
+            : null,
+          item.text.length > 0
+            ? h("div", { className: "visor-message-actions" },
+              h("button", {
+                type: "button",
+                className: "visor-copy-button",
+                onClick: onCopy,
+                title: copied ? t("markdown.copied") : t("markdown.copy"),
+                "aria-label": copied ? t("markdown.copied") : t("markdown.copy"),
+              }, copied ? h(IconCheckOutlineRegular, {}) : h(IconCopyOutlineRegular, {})))
             : null,
         ),
       );

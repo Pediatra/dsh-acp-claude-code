@@ -24,6 +24,8 @@ test("client.js registra main e sidebar.panellist no locale visor-dsh", async ()
   assert.match(code, /require\("@deepseek-ai\/dsh-client-ui-primitives"\)/u);
   assert.match(code, /h\(MarkdownText, \{ text, labels \}\)/u);
   assert.match(code, /"markdown\.copy": "Copiar"/u);
+  assert.match(code, /useClipboardCopy\(item\.text\)/u);
+  assert.match(code, /className: "visor-copy-button"/u);
   let moduleDefinition;
   const sandbox = {
     window: {
@@ -55,7 +57,12 @@ test("client.js registra main e sidebar.panellist no locale visor-dsh", async ()
   const plugin = moduleDefinition.factory((specifier) => {
     if (specifier === "react") return React;
     if (specifier === "@deepseek-ai/dsh-client-ui-primitives") {
-      return { MarkdownText: fakeMarkdownText };
+      return {
+        MarkdownText: fakeMarkdownText,
+        useClipboardCopy: () => ({ copied: false, onCopy: () => {} }),
+        IconCopyOutlineRegular: () => null,
+        IconCheckOutlineRegular: () => null,
+      };
     }
     throw new Error(`unexpected require: ${specifier}`);
   });
