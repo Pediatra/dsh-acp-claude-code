@@ -13,7 +13,9 @@ test("client.js registra main e sidebar.panellist no locale visor-dsh", async ()
   // dos badges em 390px; a lista vira uma faixa e o título ocupa a linha toda.
   assert.match(code, /\.visor-header-top\s*\{\s*flex-direction:\s*column/u);
   assert.match(code, /\.visor-title-block\s*\{\s*flex:\s*0 0 auto;\s*width:\s*100%/u);
-  assert.match(code, /max-height:\s*min\(34%,\s*260px\)/u);
+  assert.match(code, /max-height:\s*none/u);
+  assert.match(code, /\.visor-root\.is-side-open \.visor-main\s*\{\s*display:\s*none/u);
+  assert.match(code, /\.visor-side-close\s*\{\s*display:\s*inline-flex/u);
   assert.match(code, /\.visor-subline > span\s*\{\s*min-width:\s*0;\s*overflow-wrap:\s*anywhere/u);
   assert.match(code, /\.visor-root:not\(\.is-side-open\) \.visor-side\s*\{\s*display:\s*none/u);
   assert.match(code, /\.visor-side-toggle\s*\{\s*display:\s*inline-flex/u);
@@ -24,6 +26,7 @@ test("client.js registra main e sidebar.panellist no locale visor-dsh", async ()
   assert.match(code, /require\("@deepseek-ai\/dsh-client-ui-primitives"\)/u);
   assert.match(code, /h\(MarkdownText, \{ text, labels \}\)/u);
   assert.match(code, /"markdown\.copy": "Copiar"/u);
+  assert.match(code, /"list\.close": "Fechar"/u);
   assert.match(code, /useClipboardCopy\(item\.text\)/u);
   assert.match(code, /className: "visor-copy-button"/u);
   let moduleDefinition;

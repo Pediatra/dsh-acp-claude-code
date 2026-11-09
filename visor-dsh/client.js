@@ -20,6 +20,7 @@ window.__ModuleLoader__.load({
       "title": "Session viewer",
       "subtitle": "Follow persisted DSH sessions without touching their lock.",
       "list.title": "Sessions",
+      "list.close": "Close",
       "list.count": "Sessions: {count}",
       "list.search": "Filter by directory, title or id",
       "list.refresh": "Refresh",
@@ -130,6 +131,7 @@ window.__ModuleLoader__.load({
       "title": "Visor de sessões",
       "subtitle": "Acompanhe sessões persistidas do DSH sem tocar no lock delas.",
       "list.title": "Sessões",
+      "list.close": "Fechar",
       "list.count": "Sessões: {count}",
       "list.search": "Filtrar por diretório, título ou id",
       "list.refresh": "Atualizar",
@@ -263,7 +265,9 @@ window.__ModuleLoader__.load({
         background: var(--dsw-specific-sidebar-fill);
       }
       .visor-side-head { padding: 20px 16px 12px; }
+      .visor-side-head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .visor-side-head h1 { margin: 0; font-size: 16px; font-weight: 600; line-height: 24px; }
+      .visor-side-close { display: none; }
       .visor-side-head p { margin: 4px 0 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; }
       .visor-side-tools { display: flex; gap: 8px; align-items: center; padding: 0 16px 10px; }
       .visor-filter-row {
@@ -292,7 +296,7 @@ window.__ModuleLoader__.load({
       .visor-button:hover { background: var(--dsw-alias-bg-layer-2); }
       .visor-button:disabled { cursor: default; opacity: .55; }
       .visor-button.is-quiet { background: transparent; }
-      .visor-side-scroll { flex: 1; min-height: 0; overflow: auto; padding: 2px 8px 24px; }
+      .visor-side-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 2px 8px 24px; }
       .visor-side-count { padding: 0 10px 6px; color: var(--dsw-alias-label-secondary); font-size: 11px; }
       .visor-session {
         display: flex; flex-direction: column; gap: 2px; width: 100%;
@@ -516,13 +520,17 @@ window.__ModuleLoader__.load({
       @media (max-width: 860px) {
         .visor-root { flex-direction: column; }
         .visor-root:not(.is-side-open) .visor-side { display: none; }
+        .visor-root.is-side-open .visor-main { display: none; }
         .visor-side-toggle { display: inline-flex; width: 30px; min-width: 30px; padding: 0; }
         .visor-side {
-          flex: 0 0 auto;
-          max-height: min(34%, 260px);
+          flex: 1 1 auto;
+          max-height: none;
+          min-height: 0;
+          overflow: hidden;
           border-right: 0;
-          border-bottom: 1px solid var(--dsw-alias-border-l1);
+          border-bottom: 0;
         }
+        .visor-side-close { display: inline-flex; }
         .visor-side-head { padding: 12px 16px 8px; }
         .visor-side-head h1 { font-size: 15px; line-height: 22px; }
         .visor-side-head p { display: none; }
@@ -1584,7 +1592,16 @@ window.__ModuleLoader__.load({
         h("div", { className: `visor-root${sideOpen ? " is-side-open" : ""}` },
           h("aside", { id: "visor-session-list", className: "visor-side", "aria-label": t("list.title") },
             h("div", { className: "visor-side-head" },
-              h("h1", null, t("title")),
+              h("div", { className: "visor-side-head-row" },
+                h("h1", null, t("title")),
+                h("button", {
+                  type: "button",
+                  className: "visor-button is-quiet visor-side-close",
+                  onClick: () => setSideOpen(false),
+                  title: t("list.close"),
+                  "aria-label": t("list.close"),
+                }, t("list.close")),
+              ),
               h("p", null, t("subtitle")),
             ),
             h("div", { className: "visor-side-tools" },
