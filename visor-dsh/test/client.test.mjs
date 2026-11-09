@@ -21,6 +21,9 @@ test("client.js registra main e sidebar.panellist no locale visor-dsh", async ()
   assert.match(code, /"status\.idle": "Ocioso"/u);
   assert.match(code, /"turn\.openStopped": "aberto \/ sem atividade"/u);
   assert.match(code, /function LiveBadge\(\{ meta, t \}\)/u);
+  assert.match(code, /require\("@deepseek-ai\/dsh-client-ui-primitives"\)/u);
+  assert.match(code, /h\(MarkdownText, \{ text, labels \}\)/u);
+  assert.match(code, /"markdown\.copy": "Copiar"/u);
   let moduleDefinition;
   const sandbox = {
     window: {
@@ -48,9 +51,13 @@ test("client.js registra main e sidebar.panellist no locale visor-dsh", async ()
     useState: () => [null, () => {}],
   };
 
+  const fakeMarkdownText = () => null;
   const plugin = moduleDefinition.factory((specifier) => {
-    assert.equal(specifier, "react");
-    return React;
+    if (specifier === "react") return React;
+    if (specifier === "@deepseek-ai/dsh-client-ui-primitives") {
+      return { MarkdownText: fakeMarkdownText };
+    }
+    throw new Error(`unexpected require: ${specifier}`);
   });
   assert.deepEqual([...plugin.inject], ["slots", "locale"]);
 

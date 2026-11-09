@@ -2,6 +2,7 @@ window.__ModuleLoader__.load({
   id: "@local/dsh-visor",
   factory(require) {
     const React = require("react");
+    const { MarkdownText } = require("@deepseek-ai/dsh-client-ui-primitives");
     const h = React.createElement;
 
     const NS = "visor-dsh";
@@ -111,6 +112,12 @@ window.__ModuleLoader__.load({
       "tool.noOutput": "[no textual output]",
       "images.note": "{count} image(s)",
       "notice.degraded": "The decoder recovered only a prefix of the log. The last good state is kept and reading resumes when the file grows.",
+      "markdown.copy": "Copy",
+      "markdown.copied": "Copied",
+      "markdown.code": "Code",
+      "markdown.wrap": "Wrap lines",
+      "markdown.unwrap": "Unwrap lines",
+      "markdown.footnotes": "Footnotes",
     };
 
     const pt = {
@@ -215,6 +222,12 @@ window.__ModuleLoader__.load({
       "tool.noOutput": "[sem saída textual]",
       "images.note": "{count} imagem(ns)",
       "notice.degraded": "O decoder recuperou apenas um prefixo do log. O último estado bom é mantido e a leitura continua quando o arquivo crescer.",
+      "markdown.copy": "Copiar",
+      "markdown.copied": "Copiado",
+      "markdown.code": "Código",
+      "markdown.wrap": "Quebrar linhas",
+      "markdown.unwrap": "Não quebrar linhas",
+      "markdown.footnotes": "Notas de rodapé",
     };
 
     const css = `
@@ -407,21 +420,19 @@ window.__ModuleLoader__.load({
         border: 1px solid var(--dsw-alias-border-l1);
         white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 21px;
       }
-      .visor-assistant-text {
-        white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 21px;
-      }
+      .visor-assistant-text { min-width: 0; overflow-wrap: anywhere; }
       .visor-muted { color: var(--dsw-alias-label-secondary); font-size: 11.5px; }
       .visor-omitted { margin-top: 4px; color: var(--dsw-alias-label-secondary); font-size: 11px; }
       .visor-omitted summary { cursor: pointer; width: fit-content; }
       .visor-thinking { margin-top: 5px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
       .visor-thinking summary { cursor: pointer; width: fit-content; }
-      .visor-thinking pre {
-        margin: 6px 0 0; padding: 8px 10px; max-height: 230px; overflow: auto;
-        white-space: pre-wrap; overflow-wrap: anywhere;
+      .visor-thinking-body {
+        margin-top: 6px; padding: 8px 10px; max-height: 230px; overflow: auto;
         background: var(--dsw-alias-bg-layer-1);
         border-left: 2px solid var(--dsw-alias-border-l2); border-radius: 0 8px 8px 0;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; line-height: 17px;
       }
+      .visor-thinking-body > :first-child { margin-top: 0; }
+      .visor-thinking-body > :last-child { margin-bottom: 0; }
       .visor-tool {
         margin: 8px 0; border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px;
         background: var(--dsw-alias-bg-layer-1); overflow: hidden;
@@ -883,6 +894,30 @@ window.__ModuleLoader__.load({
       return state;
     }
 
+    function markdownLabels(t) {
+      return {
+        code: {
+          copyLabel: t("markdown.copy"),
+          copiedLabel: t("markdown.copied"),
+          toolbarLabels: {
+            codeLabel: t("markdown.code"),
+            wrapLabel: t("markdown.wrap"),
+            unwrapLabel: t("markdown.unwrap"),
+          },
+        },
+        footnotes: t("markdown.footnotes"),
+      };
+    }
+
+    /**
+     * Render authored Markdown with the same primitive the chat UI uses.
+     * @param {{ text: string, t: (key: string) => string, className?: string }} props
+     */
+    function MarkdownBody({ text, t, className }) {
+      const labels = React.useMemo(() => markdownLabels(t), [t]);
+      return h("div", { className }, h(MarkdownText, { text, labels }));
+    }
+
     function Badge({ tone, children, title }) {
       return h("span", { className: `visor-badge ${tone ? `is-${tone}` : ""}`, title }, children);
     }
@@ -1008,12 +1043,12 @@ window.__ModuleLoader__.load({
             item.model ? h("span", { className: "visor-mono" }, item.model) : null,
           ),
           item.text.length > 0
-            ? h("div", { className: "visor-assistant-text" }, item.text)
+            ? h(MarkdownBody, { text: item.text, t, className: "visor-assistant-text" })
             : null,
           item.reasoning.length > 0
             ? h("details", { className: "visor-thinking" },
               h("summary", null, t("assistant.thinking")),
-              h("pre", null, item.reasoning),
+              h(MarkdownBody, { text: item.reasoning, t, className: "visor-thinking-body" }),
               item.reasoningTruncated
                 ? h("div", { className: "visor-muted" }, `… (${item.reasoningLength})`)
                 : null,
