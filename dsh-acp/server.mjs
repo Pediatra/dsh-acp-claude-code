@@ -79,6 +79,12 @@ const STATE_SESSIONS_DIR = path.join(STATE_DIR, "sessions");
 const CONTROL_DIR = path.join(STATE_DIR, "control");
 const CONTROL_SOCKET = path.join(CONTROL_DIR, `shim-${process.pid}.sock`);
 const CONTROL_REGISTRY = path.join(CONTROL_DIR, `shim-${process.pid}.json`);
+/**
+ * Append-only alias → UUID index. The per-session state file is rewritten on
+ * every alias change (and `dsh-wait` reads it), so it loses the previous label;
+ * this log is the only durable record that `s7n3h-1` once meant a given UUID.
+ */
+const ALIAS_INDEX = path.join(STATE_DIR, "aliases.jsonl");
 
 const safeStateId = (id) => {
   if (!/^[A-Za-z0-9._-]+$/.test(String(id))) throw new Error(`invalid session id for state: ${id}`);
@@ -752,6 +758,7 @@ class AcpSession {
     if (typeof currentEffort === "string") this.effort = currentEffort;
 
     this.status = "idle";
+    recordAlias(this);
     this.writeState();
   }
 
@@ -1132,10 +1139,116 @@ async function toolWaitAll(args, progressToken) {
   return res;
 }
 
+/** Record alias → UUID as soon as a session is usable (new or resumed). */
+function recordAlias(session) {
+  if (!session?.sessionId) return;
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    appendFileSync(
+      ALIAS_INDEX,
+      JSON.stringify({
+        alias: session.id,
+        dsh_session_id: session.sessionId,
+        cwd: session.cwd,
+        mode: session.mode,
+        shim_pid: process.pid,
+        at: new Date().toISOString(),
+      }) + "\n",
+      { mode: 0o600 },
+    );
+  } catch (err) {
+    log("alias index write failed:", err.message);
+  }
+}
+
+const isDshSessionId = (id) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id ?? "").trim());
+
+/** Live session by alias or by durable UUID. */
+function findLiveSession(id) {
+  const key = String(id ?? "").trim();
+  if (!key) return undefined;
+  const direct = sessions.get(key);
+  if (direct) return direct;
+  const lower = key.toLowerCase();
+  for (const s of sessions.values()) {
+    if (String(s.sessionId || "").toLowerCase() === lower) return s;
+  }
+  return undefined;
+}
+
+/** Newest index row for a label (alias or UUID), or null. */
+function lookupAliasIndex(label) {
+  const key = String(label ?? "").trim().toLowerCase();
+  if (!key) return null;
+  let hit = null;
+  let lines;
+  try {
+    lines = readFileSync(ALIAS_INDEX, "utf8").split("\n");
+  } catch {
+    return null;
+  }
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (String(row.alias).toLowerCase() === key || String(row.dsh_session_id).toLowerCase() === key) hit = row;
+  }
+  return hit;
+}
+
+/** Everything still knowable about a session that is not live in this process. */
+function describeMissingSession(id) {
+  const row = lookupAliasIndex(id);
+  const dshSessionId = row?.dsh_session_id || (isDshSessionId(id) ? String(id).trim() : null);
+  if (!dshSessionId) return { dsh_session_id: null };
+  const info = {
+    dsh_session_id: dshSessionId,
+    cwd: row?.cwd || null,
+    mode: row?.mode || null,
+    profile: null,
+    known_alias: row?.alias || null,
+  };
+  try {
+    const state = JSON.parse(readFileSync(statePath(dshSessionId), "utf8"));
+    info.cwd = state.cwd || info.cwd;
+    info.mode = state.mode || info.mode;
+    info.profile = state.profile || info.profile;
+  } catch {}
+  return info;
+}
+
+/**
+ * Resolve a session id, accepting the live `sN` alias or the durable UUID.
+ *
+ * The alias is a per-process label: it is minted from a random prefix and dies
+ * with the process (and with `deepseek_close`). When it is gone, the error has
+ * to say what the alias meant and how to get back — a bare "unknown session_id"
+ * leaves the caller with no path forward, which is how a finished turn gets
+ * mistaken for a lost conversation.
+ */
 function needSession(id) {
-  const s = sessions.get(String(id));
-  if (!s) throw new Error(`unknown session_id: ${id}`);
-  return s;
+  const live = findLiveSession(id);
+  if (live) return live;
+
+  const info = describeMissingSession(id);
+  const lines = [
+    `unknown session_id: ${id}`,
+    "An alias (sN) lives only inside the bridge process that minted it: it dies on restart, on idle close and on deepseek_close. The dsh_session_id is durable.",
+  ];
+  if (info.dsh_session_id) {
+    lines.push(
+      `"${id}"${info.known_alias && info.known_alias !== id ? ` (alias of ${info.known_alias})` : ""} belongs to dsh_session_id ${info.dsh_session_id}${info.cwd ? ` — cwd ${info.cwd}` : ""}.`,
+      `Recover it with: deepseek_resume(dsh_session_id="${info.dsh_session_id}"${info.cwd ? `, cwd="${info.cwd}"` : ""}, prompt="<your next message>")`,
+    );
+  } else {
+    lines.push(
+      `No alias index entry for "${id}". List persisted sessions with deepseek_sessions(cwd="<workspace>") and resume one by its dsh_session_id.`,
+    );
+  }
+  const liveIds = [...sessions.values()].map((s) => `${s.id}${s.busy ? " (busy)" : ""}`);
+  lines.push(liveIds.length ? `Live now in this process: ${liveIds.join(", ")}` : "No live sessions in this process.");
+  throw new Error(lines.join("\n"));
 }
 
 function dshSessionsRoot(cwd) {
@@ -1253,19 +1366,44 @@ async function toolSessions(args) {
 }
 
 async function toolSend(args, progressToken) {
-  const s = needSession(args.session_id);
-  if (s.busy) {
+  let s = findLiveSession(args.session_id);
+  let reattached = null;
+  if (!s && isDshSessionId(args.session_id)) {
+    // A durable UUID that is no longer live here: reattach instead of failing.
+    // The alias died with the process that minted it; the conversation did not.
+    // createSession() sends the message as the first turn of the resumed session.
+    const info = describeMissingSession(args.session_id);
+    s = await createSession(
+      {
+        cwd: args.cwd || info.cwd || undefined,
+        mode: args.mode || info.mode || "workspace-write",
+        reasoning_effort: args.reasoning_effort,
+        profile: info.profile || args.profile,
+        prompt: String(args.message ?? ""),
+      },
+      { resumeSessionId: String(args.session_id).trim() },
+    );
+    reattached = {
+      reason: "dsh_session_id was not live in this bridge process; session resumed",
+      previous_alias: info.known_alias,
+      dsh_session_id: s.sessionId,
+      alias: s.id,
+    };
+  }
+  if (!s) s = needSession(args.session_id);
+  if (!reattached && s.busy) {
     return {
       ...s.statusPayload(),
       busy: true,
       note: "a turn is still in flight; this message was NOT queued. Wait with deepseek_wait or interrupt with deepseek_cancel first.",
     };
   }
-  s.prompt(String(args.message));
+  if (!reattached) s.prompt(String(args.message));
   const wait = resolveWait(args);
   if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "deepseek_send"));
-  if (!s.busy) return s.resultPayload();
-  return s.statusPayload();
+  const payload = s.busy ? s.statusPayload() : s.resultPayload();
+  if (reattached) payload.reattached = reattached;
+  return payload;
 }
 
 async function toolWait(args, progressToken) {
@@ -1467,11 +1605,16 @@ const TOOLS = [
     description:
       "Dispatch a follow-up message to an existing DeepSeek session and return immediately. Follow with " +
       "deepseek_wait(session_id). Returns busy without queuing the message if a turn is still running — " +
-      "an expired wait window does NOT free the session; wait again or call deepseek_cancel first.",
+      "an expired wait window does NOT free the session; wait again or call deepseek_cancel first. " +
+      "session_id accepts either the sN alias or the durable dsh_session_id: a UUID that is no longer live " +
+      "in this bridge process is resumed automatically and the reply carries reattached=... .",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: { type: "string" },
+        session_id: {
+          type: "string",
+          description: "sN alias (per-process) or the durable dsh_session_id (UUID); both are accepted",
+        },
         message: { type: "string" },
         wait: { type: "boolean", description: "false (default) = return immediately; true = block here." },
         wait_seconds: { type: "number", description: "0-21600; explicit blocking wait." },
