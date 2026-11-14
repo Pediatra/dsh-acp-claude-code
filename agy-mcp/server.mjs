@@ -34,6 +34,7 @@ const MODELS = [
   AUTO_MODEL,
   "claude-sonnet-5-5-medium",
   "gemini-4-argon-high",
+  "gemini-4-hydrogen-high",
   "gemini-3.8-flash-high",
 ];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -856,9 +857,10 @@ function normalizeModel(raw) {
   const wanted = String(raw).trim();
   if (wanted === AUTO_MODEL) return AUTO_MODEL;
   // Fixed levels per family, regardless of the requested variant:
-  // Sonnet -> medium; Argon and Flash -> high.
+  // Sonnet -> medium; Argon, Hydrogen and Flash -> high.
   if (/^claude-sonnet(?:-|$)/.test(wanted)) return "claude-sonnet-5-5-medium";
   if (/^gemini-4-argon(?:-|$)/.test(wanted)) return "gemini-4-argon-high";
+  if (/^gemini-4-hydrogen(?:-|$)/.test(wanted)) return "gemini-4-hydrogen-high";
   if (/^gemini-3\.8-flash(?:-|$)/.test(wanted)) return "gemini-3.8-flash-high";
   return DEFAULT_MODEL;
 }

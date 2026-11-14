@@ -103,8 +103,8 @@ no resume.
   `--dangerously-skip-permissions` para rodar comandos; o resto do FS continua
   read-only. Ainda assim, aponte `AGY_WORKSPACE` só para o projeto.
 
-Modelos: `gemini-4-argon-medium|high` e
-`gemini-3.8-flash-medium|high` (default `gemini-3.8-flash-high`).
+Modelos: `gemini-4-argon-high`, `gemini-4-hydrogen-high` e
+`gemini-3.8-flash-high` (default `gemini-3.8-flash-high`).
 As variantes `-low` foram removidas: para contagem de imagens o modelo barato
 divergiu; use `high` como default. Liste os disponíveis com `agy models`.
 Esforço: `low|medium|high|xhigh|max` (default `high`).
