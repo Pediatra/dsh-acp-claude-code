@@ -30,11 +30,14 @@ const PRIMARY_MODEL = process.env.AGY_PRIMARY_MODEL || "claude-sonnet-5-5-medium
 const FALLBACK_MODEL = process.env.AGY_FALLBACK_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_MODEL = process.env.AGY_MODEL || AUTO_MODEL;
 const DEFAULT_EFFORT = process.env.AGY_EFFORT || "high";
+// Hydrogen is the exception to the fixed-level rule: the caller chooses the
+// level per task (low/medium/high/xhigh). The bare id defaults to high.
+const HYDROGEN_LEVELS = ["low", "medium", "high", "xhigh"];
 const MODELS = [
   AUTO_MODEL,
   "claude-sonnet-5-5-medium",
   "gemini-4-argon-high",
-  "gemini-4-hydrogen-high",
+  ...HYDROGEN_LEVELS.map((level) => `gemini-4-hydrogen-${level}`),
   "gemini-3.8-flash-high",
 ];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -857,10 +860,12 @@ function normalizeModel(raw) {
   const wanted = String(raw).trim();
   if (wanted === AUTO_MODEL) return AUTO_MODEL;
   // Fixed levels per family, regardless of the requested variant:
-  // Sonnet -> medium; Argon, Hydrogen and Flash -> high.
+  // Sonnet -> medium; Argon and Flash -> high. Hydrogen keeps whatever level
+  // the caller asked for (bare id -> high) and falls through the rule below.
   if (/^claude-sonnet(?:-|$)/.test(wanted)) return "claude-sonnet-5-5-medium";
   if (/^gemini-4-argon(?:-|$)/.test(wanted)) return "gemini-4-argon-high";
-  if (/^gemini-4-hydrogen(?:-|$)/.test(wanted)) return "gemini-4-hydrogen-high";
+  const hydrogen = /^gemini-4-hydrogen(?:-(low|medium|high|xhigh))?$/.exec(wanted);
+  if (hydrogen) return `gemini-4-hydrogen-${hydrogen[1] ?? "high"}`;
   if (/^gemini-3\.8-flash(?:-|$)/.test(wanted)) return "gemini-3.8-flash-high";
   return DEFAULT_MODEL;
 }
@@ -870,7 +875,7 @@ function normalizeEffort(raw) {
 }
 
 function effortFromModel(model) {
-  const match = /-(low|medium|high)$/.exec(model || "");
+  const match = /-(low|medium|high|xhigh)$/.exec(model || "");
   return match ? match[1] : null;
 }
 
@@ -907,7 +912,7 @@ async function createSession(args, { conversationId = null } = {}) {
   if (autoRoute) {
     modelNote = `auto: tenta ${PRIMARY_MODEL}; cai para ${FALLBACK_MODEL} se os créditos acabarem`;
   } else if (args.model && args.model !== requestedModel) {
-    modelNote = `model ${args.model} normalized to ${requestedModel} (fixed effort per family)`;
+    modelNote = `model ${args.model} normalized to ${requestedModel} (fixed level per family; Hydrogen accepts low/medium/high/xhigh)`;
   }
   const modelLevel = effortFromModel(model);
   const effort = modelLevel || normalizeEffort(args.effort);
