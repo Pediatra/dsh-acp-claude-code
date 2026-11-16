@@ -70,6 +70,13 @@ const STATE_DIR = path.resolve(
   process.env.AGY_STATE_DIR || path.join(HOME, ".local", "state", "agy-mcp"),
 );
 const STATE_SESSIONS_DIR = path.join(STATE_DIR, "sessions");
+/**
+ * Append-only alias → conversation id index. The per-session state file is
+ * keyed by conversation id and rewritten on every alias change, so it loses the
+ * previous label; this log is the only durable record that `glj1u-1` once meant
+ * a given conversation.
+ */
+const ALIAS_INDEX = path.join(STATE_DIR, "aliases.jsonl");
 
 const safeStateId = (id) => {
   if (!/^[A-Za-z0-9._-]+$/.test(String(id))) throw new Error(`invalid session id for state: ${id}`);
@@ -395,6 +402,7 @@ class AgySession {
       this.conversationId = m.conversation_id || this.conversationId;
       this.permissionMode = m.init?.permission_mode || this.permissionMode;
       if (m.init?.model) this.model = m.init.model;
+      recordAlias(this);
       this.writeState();
       return;
     }
@@ -1098,10 +1106,118 @@ async function toolStartMany(args) {
   };
 }
 
+/** Record alias → conversation id as soon as the CLI reports the conversation. */
+function recordAlias(session) {
+  if (!session?.conversationId) return;
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    appendFileSync(
+      ALIAS_INDEX,
+      JSON.stringify({
+        alias: session.id,
+        conversation_id: session.conversationId,
+        cwd: session.cwd,
+        mode: session.mode,
+        shim_pid: process.pid,
+        at: new Date().toISOString(),
+      }) + "\n",
+      { mode: 0o600 },
+    );
+  } catch (err) {
+    log("alias index write failed:", err.message);
+  }
+}
+
+/** Newest index row for a label (alias or conversation id), or null. */
+function lookupAliasIndex(label) {
+  const key = String(label ?? "").trim().toLowerCase();
+  if (!key) return null;
+  let lines;
+  try {
+    lines = readFileSync(ALIAS_INDEX, "utf8").split("\n");
+  } catch {
+    return null;
+  }
+  let hit = null;
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (String(row.alias).toLowerCase() === key || String(row.conversation_id).toLowerCase() === key) hit = row;
+  }
+  return hit;
+}
+
+const isConversationId = (id) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id ?? "").trim());
+
+/** Live session by alias or by durable conversation id. */
+function findLiveSession(id) {
+  const key = String(id ?? "").trim();
+  if (!key) return undefined;
+  const direct = sessions.get(key);
+  if (direct) return direct;
+  const lower = key.toLowerCase();
+  for (const s of sessions.values()) {
+    if (String(s.conversationId || "").toLowerCase() === lower) return s;
+  }
+  return undefined;
+}
+
+/** Everything still knowable about a conversation that is not live here. */
+function describeMissingSession(id) {
+  const row = lookupAliasIndex(id);
+  const conversationId = row?.conversation_id || (isConversationId(id) ? String(id).trim() : null);
+  if (!conversationId) return { conversation_id: null };
+  const info = {
+    conversation_id: conversationId,
+    cwd: row?.cwd || null,
+    mode: row?.mode || null,
+    profile: null,
+    known_alias: row?.alias || null,
+  };
+  try {
+    const state = JSON.parse(readFileSync(statePath(conversationId), "utf8"));
+    info.cwd = state.cwd || info.cwd;
+    info.mode = state.mode || info.mode;
+    info.profile = state.profile || info.profile;
+  } catch {}
+  return info;
+}
+
+/**
+ * Resolve a session id, accepting the live `sN` alias or the durable
+ * conversation id.
+ *
+ * Inside one bridge process an idle-closed session still answers (the object
+ * survives and startTurn respawns with `--conversation`). What does NOT survive
+ * is the alias: it is minted per process, so after a restart the caller is left
+ * with a bare "unknown session_id" unless the error points at the conversation
+ * id and the way back.
+ */
 function needSession(id) {
-  const s = sessions.get(String(id));
-  if (!s) throw new Error(`unknown session_id: ${id}`);
-  return s;
+  const live = findLiveSession(id);
+  if (live) return live;
+
+  const info = describeMissingSession(id);
+  const lines = [
+    `unknown session_id: ${id}`,
+    "An alias (sN) lives only inside the bridge process that minted it: it dies when the bridge restarts. The conversation_id is durable.",
+  ];
+  if (info.conversation_id) {
+    lines.push(
+      `"${id}"${info.known_alias && info.known_alias !== id ? ` (alias of ${info.known_alias})` : ""} is conversation_id ${info.conversation_id}${info.cwd ? ` — cwd ${info.cwd}` : ""}.`,
+      `Recover it with: agy_resume(conversation_id="${info.conversation_id}"${info.cwd ? `, cwd="${info.cwd}"` : ""}, prompt="<your next message>")`,
+      "agy_send also accepts that conversation_id directly and reattaches by itself.",
+    );
+  } else {
+    lines.push(
+      `No alias index entry for "${id}". List persisted conversations with agy_conversations() and resume one by its conversation_id.`,
+    );
+  }
+  const liveIds = [...sessions.values()].map((s) => `${s.id}${s.status === "running" ? " (running)" : ""}`);
+  lines.push(liveIds.length ? `Live now in this process: ${liveIds.join(", ")}` : "No live sessions in this process.");
+  throw new Error(lines.join("\n"));
 }
 
 async function toolConversations(args) {
@@ -1151,15 +1267,40 @@ async function toolConversations(args) {
 }
 
 async function toolSend(args, progressToken) {
-  const s = needSession(args.session_id);
-  if (s.status === "running") {
+  let s = findLiveSession(args.session_id);
+  let reattached = null;
+  if (!s && isConversationId(args.session_id)) {
+    // A durable conversation id that is not live here: reattach instead of
+    // failing. createSession() sends the message as the first turn.
+    const info = describeMissingSession(args.session_id);
+    s = await createSession(
+      {
+        cwd: args.cwd || info.cwd || undefined,
+        mode: args.mode || info.mode || "workspace-write",
+        model: args.model,
+        effort: args.effort,
+        profile: info.profile || args.profile,
+        prompt: String(args.message ?? ""),
+      },
+      { conversationId: String(args.session_id).trim() },
+    );
+    reattached = {
+      reason: "conversation_id was not live in this bridge process; conversation resumed",
+      previous_alias: info.known_alias,
+      conversation_id: s.conversationId,
+      alias: s.id,
+    };
+  }
+  if (!s) s = needSession(args.session_id);
+  if (!reattached && s.status === "running") {
     return { ...s.statusPayload(), busy: true, note: "a turn is still in flight; this message was NOT queued. Wait with agy_wait or interrupt with agy_cancel first." };
   }
-  s.startTurn(String(args.message));
+  if (!reattached) s.startTurn(String(args.message));
   const wait = clampWait(args.wait_seconds, args.wait ? DEFAULT_WAIT_SECONDS : 0, MAX_WAIT_SECONDS);
   if (wait > 0) await s.waitForTurn(wait, (x) => sendProgress(progressToken, x, "agy_send"));
-  if (s.status !== "running") return s.resultPayload();
-  return s.statusPayload();
+  const payload = s.status !== "running" ? s.resultPayload() : s.statusPayload();
+  if (reattached) payload.reattached = reattached;
+  return payload;
 }
 
 async function toolWait(args, progressToken) {
@@ -1350,11 +1491,14 @@ const TOOLS = [
   },
   {
     name: "agy_send",
-    description: "Send a follow-up message to an existing agy session (resumes the process if it was idle-closed). Returns busy if a turn is still running.",
+    description: "Send a follow-up message to an existing agy session (resumes the process if it was idle-closed). Returns busy if a turn is still running. session_id accepts either the sN alias or the durable conversation_id: a conversation id that is no longer live in this bridge process is resumed automatically and the reply carries reattached=... .",
     inputSchema: {
       type: "object",
       properties: {
-        session_id: { type: "string" },
+        session_id: {
+          type: "string",
+          description: "sN alias (per-process) or the durable conversation_id (UUID); both are accepted",
+        },
         message: { type: "string" },
         wait: { type: "boolean", description: "false (default) = return immediately; true = block here." },
         wait_seconds: { type: "number", description: "0-3600; explicit blocking wait." },
