@@ -1827,8 +1827,50 @@ async function handleControlRequest(request) {
   return { ok: false, code: "unknown-action", error: `acao desconhecida: ${action}` };
 }
 
+/** True when the pid belongs to a live process (EPERM = exists, not ours). */
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === "EPERM";
+  }
+}
+
+/**
+ * Drop control registries left behind by shims that died without a graceful
+ * shutdown (SIGKILL, crash, OOM).
+ *
+ * A dead `shim-<pid>.json` still names a socket nobody listens on, and any
+ * client that scans CONTROL_DIR — the session panel, for one — can pick it and
+ * get `connect ECONNREFUSED .../shim-<pid>.sock` instead of the live bridge.
+ * Pruning at startup keeps the directory honest.
+ */
+function pruneStaleControlEntries() {
+  let names;
+  try {
+    names = readdirSync(CONTROL_DIR);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const match = /^shim-(\d+)\.(?:json|sock)$/.exec(name);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid || isPidAlive(pid)) continue;
+    try {
+      unlinkSync(path.join(CONTROL_DIR, name));
+      log("pruned stale control entry:", name);
+    } catch (err) {
+      log("control prune failed:", name, err.message);
+    }
+  }
+}
+
 function startControlServer() {
   if (process.env.DSH_ACP_CONTROL === "0") return;
+  pruneStaleControlEntries();
   try {
     if (existsSync(CONTROL_SOCKET)) unlinkSync(CONTROL_SOCKET);
     controlServer = createServer((socket) => {
