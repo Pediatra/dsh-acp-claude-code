@@ -11,7 +11,7 @@
  * read-only.
  */
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -30,16 +30,8 @@ const PRIMARY_MODEL = process.env.AGY_PRIMARY_MODEL || "claude-sonnet-5-5-medium
 const FALLBACK_MODEL = process.env.AGY_FALLBACK_MODEL || "gemini-3.8-flash-high";
 const DEFAULT_MODEL = process.env.AGY_MODEL || AUTO_MODEL;
 const DEFAULT_EFFORT = process.env.AGY_EFFORT || "high";
-// Hydrogen is the exception to the fixed-level rule: the caller chooses the
-// level per task (low/medium/high/xhigh). The bare id defaults to high.
-const HYDROGEN_LEVELS = ["low", "medium", "high", "xhigh"];
-const MODELS = [
-  AUTO_MODEL,
-  "claude-sonnet-5-5-medium",
-  "gemini-4-argon-high",
-  ...HYDROGEN_LEVELS.map((level) => `gemini-4-hydrogen-${level}`),
-  "gemini-3.8-flash-high",
-];
+// No hardcoded model list: the catalog is read from `agy models` (see
+// modelCatalog) because it follows the signed-in account.
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const DEBUG = process.env.AGY_DEBUG === "1";
 // Hard gate used by orchestrators (e.g. DSH in read-only mode): when set to
@@ -227,6 +219,86 @@ function findAgy() {
 const AGY = findAgy();
 
 /* ------------------------------------------------------------------ */
+/* Model catalog                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `agy models` is per account: the same machine can list Gemini 4 Hydrogen
+ * today and only Flash tomorrow after an account switch. Hardcoding ids makes
+ * the bridge reject a valid model (or accept a dead one) until someone edits
+ * the file, so the catalog is read from the CLI and cached for a few minutes.
+ * A failure to read it is not fatal: we then let the CLI speak for itself.
+ */
+let modelCatalogCache = null;
+
+function modelCatalog({ refresh = false } = {}) {
+  const now = Date.now();
+  if (!refresh && modelCatalogCache && now - modelCatalogCache.at < 300_000) {
+    return modelCatalogCache.ids;
+  }
+  try {
+    const out = execFileSync(AGY, ["models"], {
+      encoding: "utf8",
+      timeout: 20_000,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: process.env,
+    });
+    const ids = new Set();
+    for (const line of out.split("\n")) {
+      const id = line.split("\t")[0].trim();
+      if (id && !/^Fetching/i.test(id)) ids.add(id);
+    }
+    modelCatalogCache = { ids, at: now };
+    return ids;
+  } catch (err) {
+    log("model catalog unavailable:", err.message);
+    return null;
+  }
+}
+
+/** First candidate the account actually offers (the first one wins when unknown). */
+function pickAvailable(candidates) {
+  const catalog = modelCatalog();
+  if (!catalog || catalog.size === 0) return candidates[0] ?? null;
+  return candidates.find((id) => catalog.has(id)) ?? null;
+}
+
+/**
+ * Resolve an id inside a family: keep it when the account has it, otherwise use
+ * whatever the account offers for that family, preferring the same level.
+ * Returns the requested id when the family is gone, so the caller can explain.
+ */
+function familyModel(wanted, family, fallbackId) {
+  const catalog = modelCatalog();
+  if (!catalog || catalog.size === 0) return wanted || fallbackId;
+  if (catalog.has(wanted)) return wanted;
+  const level = /-(low|medium|high|xhigh)$/.exec(wanted || "")?.[1];
+  const matches = [...catalog].filter((id) => id === family || id.startsWith(`${family}-`));
+  if (matches.length === 0) return wanted;
+  if (level) return matches.find((id) => id.endsWith(`-${level}`)) ?? matches[0];
+  return matches.find((id) => id.endsWith("-high")) ?? matches[0];
+}
+
+/** Turn the CLI's terse refusal into the list of models this account has. */
+function assertModelAvailable(model) {
+  const catalog = modelCatalog();
+  if (!catalog || catalog.size === 0 || catalog.has(model)) return;
+  const prefix = model.split("-").slice(0, 2).join("-");
+  const same = [...catalog].filter((id) => id.startsWith(prefix));
+  throw new Error(
+    [
+      `model "${model}" is not available in the current agy account.`,
+      same.length ? `Same family available: ${same.join(", ")}.` : null,
+      `Available: ${[...catalog].join(", ")}.`,
+      "The model list follows the signed-in account; run `agy models` or switch accounts.",
+    ].filter(Boolean).join("\n"),
+  );
+}
+
+/** Claude models in this CLI reject --effort; Gemini models accept it. */
+const modelTakesEffort = (model) => !/^claude-/i.test(String(model || ""));
+
+/* ------------------------------------------------------------------ */
 /* Command construction                                               */
 /* ------------------------------------------------------------------ */
 
@@ -236,9 +308,13 @@ function buildSpawn({ mode, model, effort, cwd, conversationId, profile }) {
     "--input-format", "stream-json",
     "--output-format", "stream-json",
     "--model", model,
-    "--effort", effort,
     "--mode", "accept-edits",
   ];
+  // Claude models here refuse --effort ("--effort is not supported for model
+  // ..."), and the CLI reports that before checking the model name, which made
+  // a missing model look like an effort bug. Only ask for effort where it is
+  // accepted.
+  if (modelTakesEffort(model)) agyArgs.push("--effort", effort);
   if (conversationId) agyArgs.push("--conversation", conversationId);
   if (mode === "workspace-write") agyArgs.push("--dangerously-skip-permissions");
 
@@ -867,14 +943,20 @@ function normalizeModel(raw) {
   if (raw === undefined || raw === null || raw === "") return DEFAULT_MODEL;
   const wanted = String(raw).trim();
   if (wanted === AUTO_MODEL) return AUTO_MODEL;
-  // Fixed levels per family, regardless of the requested variant:
-  // Sonnet -> medium; Argon and Flash -> high. Hydrogen keeps whatever level
-  // the caller asked for (bare id -> high) and falls through the rule below.
-  if (/^claude-sonnet(?:-|$)/.test(wanted)) return "claude-sonnet-5-5-medium";
-  if (/^gemini-4-argon(?:-|$)/.test(wanted)) return "gemini-4-argon-high";
+  // Fixed level per family, but the id itself always comes from `agy models`:
+  // the catalog follows the signed-in account and the versioned names change
+  // (claude-sonnet-5-5-* became claude-sonnet-4-6, Hydrogen disappeared...).
+  if (/^claude-sonnet(?:-|$)/.test(wanted)) return familyModel(wanted, "claude-sonnet", PRIMARY_MODEL);
+  if (/^gemini-4-argon(?:-|$)/.test(wanted)) return familyModel(wanted, "gemini-4-argon", "gemini-4-argon-high");
   const hydrogen = /^gemini-4-hydrogen(?:-(low|medium|high|xhigh))?$/.exec(wanted);
-  if (hydrogen) return `gemini-4-hydrogen-${hydrogen[1] ?? "high"}`;
-  if (/^gemini-3\.8-flash(?:-|$)/.test(wanted)) return "gemini-3.8-flash-high";
+  if (hydrogen) {
+    return familyModel(`gemini-4-hydrogen-${hydrogen[1] ?? "high"}`, "gemini-4-hydrogen", "gemini-4-hydrogen-high");
+  }
+  const carbon = /^gemini-4-carbon(?:-(low|medium|high|xhigh))?$/.exec(wanted);
+  if (carbon) {
+    return familyModel(`gemini-4-carbon-${carbon[1] ?? "high"}`, "gemini-4-carbon", "gemini-4-carbon-high");
+  }
+  if (/^gemini-3\.8-flash(?:-|$)/.test(wanted)) return familyModel(wanted, "gemini-3.8-flash", "gemini-3.8-flash-high");
   return DEFAULT_MODEL;
 }
 
@@ -912,13 +994,28 @@ async function createSession(args, { conversationId = null } = {}) {
   const cwd = resolveCwd(args.cwd);
   const requestedModel = normalizeModel(args.model);
   const autoRoute = requestedModel === AUTO_MODEL;
-  const model = autoRoute ? PRIMARY_MODEL : requestedModel;
+  let model = autoRoute ? PRIMARY_MODEL : requestedModel;
+  if (autoRoute) {
+    // The configured primary may be gone after an account switch; auto must
+    // degrade to something the account actually offers, never to a dead id.
+    const catalog = modelCatalog();
+    const preferred = pickAvailable([PRIMARY_MODEL, FALLBACK_MODEL]);
+    if (preferred) {
+      model = preferred;
+    } else if (catalog && catalog.size > 0) {
+      model = [...catalog].find((id) => /^gemini-.+-(high|xhigh)$/.test(id)) ?? [...catalog][0];
+    }
+  } else {
+    assertModelAvailable(model);
+  }
   const router = autoRoute
-    ? { mode: "auto", primary: PRIMARY_MODEL, fallback: FALLBACK_MODEL, used_fallback: false }
+    ? { mode: "auto", primary: model, configured_primary: PRIMARY_MODEL, fallback: FALLBACK_MODEL, used_fallback: false }
     : null;
   let modelNote = null;
   if (autoRoute) {
-    modelNote = `auto: tenta ${PRIMARY_MODEL}; cai para ${FALLBACK_MODEL} se os créditos acabarem`;
+    modelNote = model === PRIMARY_MODEL
+      ? `auto: tenta ${PRIMARY_MODEL}; cai para ${FALLBACK_MODEL} se os créditos acabarem`
+      : `auto: ${PRIMARY_MODEL} indisponível nesta conta; usando ${model}`;
   } else if (args.model && args.model !== requestedModel) {
     modelNote = `model ${args.model} normalized to ${requestedModel} (fixed level per family; Hydrogen accepts low/medium/high/xhigh)`;
   }
@@ -1391,6 +1488,23 @@ async function toolList() {
   return { sessions: [...sessions.values()].map((s) => s.statusPayload()) };
 }
 
+async function toolModels(args) {
+  const catalog = modelCatalog({ refresh: args?.refresh === true });
+  if (!catalog) throw new Error("could not read `agy models` (is agy installed and signed in?)");
+  return {
+    models: [...catalog],
+    count: catalog.size,
+    default_model: DEFAULT_MODEL,
+    auto: {
+      configured_primary: PRIMARY_MODEL,
+      fallback: FALLBACK_MODEL,
+      configured_primary_available: catalog.has(PRIMARY_MODEL),
+      fallback_available: catalog.has(FALLBACK_MODEL),
+    },
+    note: "The list follows the signed-in agy account. model='auto' picks the first available of primary then fallback.",
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /* MCP stdio                                                         */
 /* ------------------------------------------------------------------ */
@@ -1421,7 +1535,7 @@ const TOOLS = [
         prompt: { type: "string", description: "Self-contained task. Name files by path; the agent can read them." },
         cwd: { type: "string", description: "Working directory inside the workspace (default: workspace root)." },
         mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
-        model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL} (auto: ${PRIMARY_MODEL} first, ${FALLBACK_MODEL} if credits run out)` },
+        model: { type: "string", description: `default ${DEFAULT_MODEL} (auto: ${PRIMARY_MODEL} first, ${FALLBACK_MODEL} if credits run out). Any id from agy_models; the catalog follows the signed-in account.` },
         effort: { type: "string", enum: EFFORTS, description: `default ${DEFAULT_EFFORT}` },
         profile: PROFILE_SCHEMA,
         verify_command: { type: "string", description: "Optional test of THIS delegated work, not the repo-wide gate. If it fails, the agent gets the error; keep verify_retries=0 for delegated tasks." },
@@ -1452,7 +1566,7 @@ const TOOLS = [
               prompt: { type: "string" },
               cwd: { type: "string" },
               mode: { type: "string", enum: ["read-only", "workspace-write"] },
-              model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL} (auto: ${PRIMARY_MODEL} then ${FALLBACK_MODEL})` },
+              model: { type: "string", description: `default ${DEFAULT_MODEL} (auto: ${PRIMARY_MODEL} then ${FALLBACK_MODEL}). Any id from agy_models; the catalog follows the signed-in account.` },
               effort: { type: "string", enum: EFFORTS },
               profile: PROFILE_SCHEMA,
             },
@@ -1477,7 +1591,7 @@ const TOOLS = [
         prompt: { type: "string", description: "Message to send on resume, e.g. 'Continue de onde parou'" },
         cwd: { type: "string", description: "Working directory inside the project (default: project root)" },
         mode: { type: "string", enum: ["read-only", "workspace-write"], description: "workspace-write (default) or read-only" },
-        model: { type: "string", enum: MODELS, description: `default ${DEFAULT_MODEL} (auto: ${PRIMARY_MODEL} first, ${FALLBACK_MODEL} if credits run out)` },
+        model: { type: "string", description: `default ${DEFAULT_MODEL} (auto: ${PRIMARY_MODEL} first, ${FALLBACK_MODEL} if credits run out). Any id from agy_models; the catalog follows the signed-in account.` },
         effort: { type: "string", enum: EFFORTS, description: `default ${DEFAULT_EFFORT}` },
         profile: PROFILE_SCHEMA,
         verify_command: { type: "string", description: "Optional test of THIS delegated work, not the repo-wide gate. If it fails, the agent gets the error; keep verify_retries=0 for delegated tasks." },
@@ -1608,6 +1722,18 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "agy_models",
+    description:
+      "List the models the signed-in agy account actually offers (runs `agy models`). The catalog follows the account — " +
+      "a model that worked yesterday can be gone today — so check here before naming one.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        refresh: { type: "boolean", description: "bypass the 5-minute cache" },
+      },
+    },
+  },
+  {
     name: "agy_conversations",
     description:
       "List persisted agy conversations from the local conversation database (survives restarts), newest first. " +
@@ -1641,6 +1767,7 @@ async function callTool(name, args, progressToken) {
     case "agy_cancel": return textResult(await toolCancel(args));
     case "agy_close": return textResult(await toolClose(args));
     case "agy_list": return textResult(await toolList());
+    case "agy_models": return textResult(await toolModels(args));
     case "agy_conversations": return textResult(await toolConversations(args));
     default: return textResult(`unknown tool: ${name}`, true);
   }

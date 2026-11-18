@@ -103,14 +103,22 @@ no resume.
   `--dangerously-skip-permissions` para rodar comandos; o resto do FS continua
   read-only. Ainda assim, aponte `AGY_WORKSPACE` só para o projeto.
 
-Modelos: `gemini-4-argon-high`, `gemini-3.8-flash-high` e a família
-`gemini-4-hydrogen-*` (default `gemini-3.8-flash-high`).
-Em **Argon e Flash** o nível é fixo: as variantes `-low`/`-medium` foram
-removidas porque, para contagem de imagens, o modelo barato divergiu. O
-**Hydrogen é a exceção**: aceita `low|medium|high|xhigh` explícito
-(`gemini-4-hydrogen-xhigh`), o `effort` acompanha o sufixo, e o id sem sufixo
-cai em `high`. Liste os disponíveis com `agy models`.
-Esforço: `low|medium|high|xhigh|max` (default `high`).
+Modelos: **o catálogo é lido de `agy models`**, não é fixo no código. A lista
+acompanha a conta logada — o mesmo computador lista `gemini-4-hydrogen-*` hoje e
+só `gemini-3.8-flash-*` amanhã depois de trocar de conta. Use a ferramenta
+`agy_models` (ou rode `agy models`) para ver o que existe agora; o resultado fica
+em cache por 5 minutos.
+
+- Famílias com nível fixo no id (Argon, Flash, Carbon, Hydrogen): o sufixo
+  `-low|-medium|-high|-xhigh` decide o `effort`. Id sem sufixo cai em `-high`.
+- Se a família pedida não existe na conta, o bridge **falha com a lista do que
+  existe** em vez de repassar o erro cru do CLI.
+- `model="auto"` (default) tenta o principal e, se ele não estiver disponível
+  nesta conta, usa o fallback — sempre um id que existe, nunca um morto.
+- **Modelos `claude-*` não aceitam `--effort`** neste CLI; o bridge omite a flag
+  para eles (antes isso virava o erro enganoso `--effort is not supported`).
+
+Esforço: `low|medium|high|xhigh|max` (default `high`), quando o modelo aceita.
 
 **Trava de escrita para orquestradores:** `AGY_ALLOW_WRITE=0` rebaixa todo
 `workspace-write` para `read-only`. O resultado volta com `mode_requested` e
