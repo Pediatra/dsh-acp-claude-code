@@ -948,16 +948,21 @@ function normalizeModel(raw) {
   // (claude-sonnet-5-5-* became claude-sonnet-4-6, Hydrogen disappeared...).
   if (/^claude-sonnet(?:-|$)/.test(wanted)) return familyModel(wanted, "claude-sonnet", PRIMARY_MODEL);
   if (/^gemini-4-argon(?:-|$)/.test(wanted)) return familyModel(wanted, "gemini-4-argon", "gemini-4-argon-high");
-  const hydrogen = /^gemini-4-hydrogen(?:-(low|medium|high|xhigh))?$/.exec(wanted);
-  if (hydrogen) {
-    return familyModel(`gemini-4-hydrogen-${hydrogen[1] ?? "high"}`, "gemini-4-hydrogen", "gemini-4-hydrogen-high");
+  // Gemini 4 families where the caller picks the level per task: the suffix
+  // wins, and a bare id falls back to high.
+  const leveled = /^gemini-4-(hydrogen|neon)(?:-(low|medium|high|xhigh))?$/.exec(wanted);
+  if (leveled) {
+    const family = `gemini-4-${leveled[1]}`;
+    return familyModel(`${family}-${leveled[2] ?? "high"}`, family, `${family}-high`);
   }
   const carbon = /^gemini-4-carbon(?:-(low|medium|high|xhigh))?$/.exec(wanted);
   if (carbon) {
     return familyModel(`gemini-4-carbon-${carbon[1] ?? "high"}`, "gemini-4-carbon", "gemini-4-carbon-high");
   }
   if (/^gemini-3\.8-flash(?:-|$)/.test(wanted)) return familyModel(wanted, "gemini-3.8-flash", "gemini-3.8-flash-high");
-  return DEFAULT_MODEL;
+  // Unrecognized id: pass it through so assertModelAvailable can say what the
+  // account offers. Silently routing it to "auto" would run the wrong model.
+  return wanted;
 }
 
 function normalizeEffort(raw) {

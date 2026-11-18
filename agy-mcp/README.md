@@ -109,10 +109,15 @@ só `gemini-3.8-flash-*` amanhã depois de trocar de conta. Use a ferramenta
 `agy_models` (ou rode `agy models`) para ver o que existe agora; o resultado fica
 em cache por 5 minutos.
 
-- Famílias com nível fixo no id (Argon, Flash, Carbon, Hydrogen): o sufixo
-  `-low|-medium|-high|-xhigh` decide o `effort`. Id sem sufixo cai em `-high`.
+- **Nível escolhido por chamada** em Hydrogen e Neon: `gemini-4-hydrogen-xhigh`,
+  `gemini-4-neon-medium`; o sufixo decide o `effort` e o id sem sufixo cai em
+  `-high`.
+- Famílias com nível fixo (Argon, Flash, Carbon): o pedido é normalizado para o
+  `-high` que a conta oferece.
 - Se a família pedida não existe na conta, o bridge **falha com a lista do que
   existe** em vez de repassar o erro cru do CLI.
+- Um id desconhecido é repassado como veio (não vira `auto` silenciosamente),
+  para o erro dizer qual modelo faltou.
 - `model="auto"` (default) tenta o principal e, se ele não estiver disponível
   nesta conta, usa o fallback — sempre um id que existe, nunca um morto.
 - **Modelos `claude-*` não aceitam `--effort`** neste CLI; o bridge omite a flag
